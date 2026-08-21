@@ -48,14 +48,27 @@ cd "$KERNEL_DIR"
 # ============================================================
 # Intégration Backslashxx KernelSU
 # ============================================================
-echo "=== Intégration Backslashxx KernelSU ==="
+echo "=== Intégration Backslashxx KernelSU (version pinée) ==="
 rm -rf drivers/kernelsu
 
-git clone --depth=1 --filter=blob:none --sparse https://github.com/backslashxx/KernelSU.git /tmp/backslashxx-src
-(cd /tmp/backslashxx-src && git sparse-checkout set kernel)
+git clone --filter=blob:none --sparse https://github.com/backslashxx/KernelSU.git /tmp/backslashxx-src
+cd /tmp/backslashxx-src
+
+# On revient à un commit plus compatible avec les patches SUSFS 2.2.00
+# (période où ksu_is_init_rc_hook_enabled / ksu_handle_sys_read / ksu_hide_setprocattr étaient encore présents)
+git checkout 67fa81b60c7efe2fc1a608fdd5965864706a4ede 2>/dev/null || \
+git checkout HEAD~120 2>/dev/null || \
+git checkout HEAD~80
+
+git sparse-checkout set kernel
+cd -
+
 mkdir -p drivers/kernelsu
 cp -a /tmp/backslashxx-src/kernel/. drivers/kernelsu/
 rm -rf /tmp/backslashxx-src
+
+echo "Commit Backslashxx utilisé :"
+(cd drivers/kernelsu 2>/dev/null; git rev-parse HEAD 2>/dev/null || echo "non-git copy")
 
 # Kconfig + Makefile
 if ! grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig; then
