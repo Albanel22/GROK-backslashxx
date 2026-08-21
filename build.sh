@@ -73,7 +73,7 @@ fi
 
 echo "=== Configuration du kernel ==="
 mkdir -p out
-make O=out ARCH=arm64 vendor/kiev_defconfig
+make O=out ARCH=arm64 vendor/lito-perf_defconfig
 
 # Forcer les options KernelSU + SUSFS
 cat << EOF >> out/.config
