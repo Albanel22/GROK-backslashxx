@@ -41,7 +41,7 @@ hook_insert() {
     echo "❌ Signature attendue introuvable dans $file — hook NON inséré."
     return 1
   fi
-  perl -0777 -i -pe "s/($sig_re)/${extern_block}\$1\n#ifdef CONFIG_KSU\n${call_line}\n#endif\n/s" "$file"
+  perl -0777 -i -pe "s/($sig_re)/${extern_block}\$1\n#ifdef CONFIG_KSU\n#pragma GCC diagnostic ignored \x22-Wdeclaration-after-statement\x22\n${call_line}\n#endif\n/s" "$file"
   echo "[+] Hook inséré dans $file"
   return 0
 }
