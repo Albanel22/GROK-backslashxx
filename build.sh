@@ -49,7 +49,7 @@ hook_insert() {
 HOOKS_FAILED=0
 
 hook_insert "fs/exec.c" \
-  'static int do_execveat_common\([^)]*\)\s*\n\s*int flags\)\s*\n\{' \
+  '(?s)static int do_execveat_common\(.*?int flags\)\s*\n\{' \
   '#ifdef CONFIG_KSU\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,\n\t\t\t\t\t void *envp, int *flags);\n#endif\n' \
   'ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);' \
   || HOOKS_FAILED=1
