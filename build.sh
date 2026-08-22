@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-echo "=== Début du build Backslashxx + SusFS + ksud + Coccinelle classic-hooks ==="
+echo "=== Début du build Backslashxx + SusFS + ksud + Coccinelle ==="
 df -h
 
 sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
@@ -29,11 +29,11 @@ echo "OK: hooks Coccinelle appliqués"
 cd "$GITHUB_WORKSPACE/kernel_sources"
 
 echo "=== Vérification des hooks ==="
-grep -n "ksu_handle_execveat" fs/exec.c | head -5
-grep -n "ksu_handle_faccessat" fs/open.c | head -5
-grep -n "ksu_handle_stat" fs/stat.c | head -5
+grep -n "ksu_handle_execveat" fs/exec.c | head -3
+grep -n "ksu_handle_faccessat" fs/open.c | head -3
+grep -n "ksu_handle_stat" fs/stat.c | head -3
 
-echo "=== Téléchargement du repo JackA1ltman pour SusFS ==="
+echo "=== Téléchargement du repo JackA1ltman ==="
 git clone --depth=1 https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd.git /tmp/jack_repo 2>/dev/null || true
 
 echo "=== Application du patch SusFS 4.19 ==="
@@ -46,9 +46,11 @@ fi
 
 echo "=== Corrections post-patch ==="
 sed -i '1617d' fs/proc/task_mmu.c 2>/dev/null || true
+echo "OK: task_mmu.c corrigé"
 
 if ! grep -q "susfs_def.h" fs/namespace.c; then
   sed -i '/#include <linux\/sched\/task.h>/a #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n#include <linux/susfs_def.h>\n#endif\n\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nextern bool susfs_is_current_ksu_domain(void);\nextern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n#define CL_COPY_MNT_NS BIT(25)\n#endif' fs/namespace.c
+  echo "OK: include namespace.c ajouté"
 fi
 
 if ! grep -q "ksu_handle_setresuid" kernel/sys.c; then
@@ -86,6 +88,64 @@ with open('kernel/sys.c', 'w') as f:
 PYEOF
   python3 /tmp/hook_setresuid.py
 fi
+
+echo "=== Correction path_umount (déplacer APRÈS may_mount) ==="
+python3 << 'PYEOF'
+import re
+with open('fs/namespace.c', 'r') as f:
+    content = f.read()
+
+old_block = '''static int can_umount(const struct path *path, int flags)
+{
+struct mount *mnt = real_mount(path->mnt);
+
+if (flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW))
+  return -EINVAL;
+if (!may_mount())
+  return -EPERM;
+if (path->dentry != path->mnt->mnt_root)
+  return -EINVAL;
+if (!check_mnt(mnt))
+  return -EINVAL;
+if (mnt->mnt.mnt_flags & MNT_LOCKED)
+  return -EINVAL;
+if (flags & MNT_FORCE && !capable(CAP_SYS_ADMIN))
+  return -EPERM;
+return 0;
+}
+
+int path_umount(struct path *path, int flags)
+{
+struct mount *mnt = real_mount(path->mnt);
+int ret;
+
+ret = can_umount(path, flags);
+if (!ret)
+  ret = do_umount(mnt, flags);
+
+dput(path->dentry);
+mntput_no_expire(mnt);
+return ret;
+}
+'''
+
+if old_block in content:
+    content = content.replace(old_block, '')
+    print("OK: bloc path_umount supprimé")
+
+may_mount_pattern = r'(static inline bool may_mount\(void\)\n\{.*?\n\}\n)'
+match = re.search(may_mount_pattern, content, re.DOTALL)
+
+if match:
+    insert_pos = match.end()
+    content = content[:insert_pos] + '\n' + old_block + content[insert_pos:]
+    print("OK: path_umount réinséré APRÈS may_mount")
+else:
+    print("ATTENTION: may_mount non trouvé, path_umount non déplacé")
+
+with open('fs/namespace.c', 'w') as f:
+    f.write(content)
+PYEOF
 
 echo "=== Configuration ==="
 export ARCH=arm64
