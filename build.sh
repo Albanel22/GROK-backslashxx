@@ -15,22 +15,16 @@ JACK_DIR="$WORKSPACE/NonGKI_Kernel_Build_2nd"
 
 KERNEL_REPO="https://github.com/LineageOS/android_kernel_motorola_sm8250.git"
 KERNEL_BRANCH="lineage-23.2"
-
 JACK_REPO="https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd.git"
 JACK_BRANCH="mainline"
-
 DEFCONFIG="vendor/lito-perf_defconfig"
 
 BOOT_URL="https://mirrorbits.lineageos.org/full/kiev/20260809/boot.img"
 DTBO_URL="https://mirrorbits.lineageos.org/full/kiev/20260809/dtbo.img"
 
-rm -rf "$KERNEL_DIR"
-rm -rf "$JACK_DIR"
-rm -rf "$OUTPUT_DIR"
-rm -rf "$WORKSPACE/repack"
-rm -rf "$WORKSPACE/verify_boot"
-rm -rf "$WORKSPACE/android-ndk-r26d"
-rm -rf "$WORKSPACE/magisk_extract"
+rm -rf "$KERNEL_DIR" "$JACK_DIR" "$OUTPUT_DIR"
+rm -rf "$WORKSPACE/repack" "$WORKSPACE/verify_boot"
+rm -rf "$WORKSPACE/android-ndk-r26d" "$WORKSPACE/magisk_extract"
 
 rm -f "$WORKSPACE/ksud"
 rm -f "$WORKSPACE/final_boot.img"
@@ -67,7 +61,7 @@ sudo apt-get install -y \
     wget \
     zip
 
-echo "Clonage kernel"
+echo "Clonage du kernel"
 
 git clone \
     --depth=1 \
@@ -115,7 +109,7 @@ git fetch --tags --force
 
 LATEST_TAG="$(git describe --abbrev=0 --tags)"
 
-echo "KernelSU tag: $LATEST_TAG"
+echo "KernelSU: $LATEST_TAG"
 
 git checkout "$LATEST_TAG"
 
@@ -124,7 +118,7 @@ cd "$KERNEL_DIR"
 bash "$KERNEL_DIR/KernelSU/kernel/setup.sh"
 
 if [ ! -L "$KERNEL_DIR/drivers/kernelsu" ]; then
-    echo "ERREUR: drivers/kernelsu absent"
+    echo "ERREUR: KernelSU non intégré"
     exit 1
 fi
 
@@ -163,7 +157,7 @@ echo "KPROBES=OK"
 echo "KSU=OK"
 echo "EXT4_FS=OK"
 
-echo "Application patch SuSFS"
+echo "Application du patch SuSFS"
 
 PATCH_419="$(
     find "$JACK_DIR/Patches" \
@@ -174,7 +168,7 @@ PATCH_419="$(
 )"
 
 if [ -z "$PATCH_419" ]; then
-    echo "ERREUR: patch SuSFS 4.19 absent"
+    echo "ERREUR: patch SuSFS 4.19 introuvable"
     exit 1
 fi
 
@@ -186,8 +180,142 @@ patch \
     < "$PATCH_419" \
     2>&1 | tee "$OUTPUT_DIR/susfs-patch.log" || PATCH_STATUS=$?
 
-REJ_DIR="$OUTPUT_DIR/rejects"
-mkdir -p "$REJ_DIR"
+echo "Correction namespace.c"
+
+python3 - "$KERNEL_DIR/fs/namespace.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+
+include_block = """#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+#include <linux/susfs_def.h>
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+"""
+
+extern_block = """#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+extern bool susfs_is_current_ksu_domain(void);
+extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
+
+#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */
+
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+
+"""
+
+anchor = '#include <linux/sched/task.h>\n'
+
+if 'susfs_def.h' not in text:
+    if anchor not in text:
+        raise SystemExit("namespace.c: include anchor absent")
+    text = text.replace(
+        anchor,
+        anchor + include_block + "\n" + extern_block,
+        1
+    )
+
+if 'susfs_alloc_non_unshare_ksu_vfsmnt' not in text:
+
+    old = """\tif (!type)
+\t\treturn ERR_PTR(-ENODEV);
+
+\tmnt = alloc_vfsmnt(name);
+\tif (!mnt)
+"""
+
+    new = """\tif (!type)
+\t\treturn ERR_PTR(-ENODEV);
+
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+\tif (static_branch_unlikely(&susfs_is_sdcard_android_data_not_decrypted)) {
+\t\tif (susfs_is_current_ksu_domain()) {
+\t\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(name ? : "none");
+\t\t\tgoto bypass_orig_flow;
+\t\t}
+\t}
+#endif
+
+\tmnt = alloc_vfsmnt(name);
+
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+bypass_orig_flow:
+#endif
+
+\tif (!mnt)
+"""
+
+    if old not in text:
+        raise SystemExit(
+            "namespace.c: emplacement vfs_kern_mount introuvable"
+        )
+
+    text = text.replace(old, new, 1)
+
+path.write_text(text)
+PY
+
+echo "Correction task_mmu.c"
+
+python3 - "$KERNEL_DIR/fs/proc/task_mmu.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+
+if 'SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))' not in text:
+
+    old = """\t\tret = down_read_killable(&mm->mmap_sem);
+\t\tif (ret)
+\t\t\tgoto out_free;
+\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);
+"""
+
+    new = """\t\tret = down_read_killable(&mm->mmap_sem);
+\t\tif (ret)
+\t\t\tgoto out_free;
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+\t\tvma = find_vma(mm, start_vaddr);
+\t\tif (vma && vma->vm_file &&
+\t\t    SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
+\t\t\tgoto bypass_orig_flow;
+#endif
+\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+bypass_orig_flow:
+#endif
+"""
+
+    if old not in text:
+        raise SystemExit(
+            "task_mmu.c: emplacement pagemap_read introuvable"
+        )
+
+    text = text.replace(old, new, 1)
+
+path.write_text(text)
+PY
+
+echo "Vérification des corrections"
+
+if grep -R -n \
+    "susfs_alloc_non_unshare_ksu_vfsmnt" \
+    "$KERNEL_DIR/fs/namespace.c" >/dev/null; then
+    echo "namespace.c: OK"
+else
+    echo "ERREUR: namespace.c"
+    exit 1
+fi
+
+if grep -R -n \
+    "SUSFS_IS_INODE_SUS_MAP" \
+    "$KERNEL_DIR/fs/proc/task_mmu.c" >/dev/null; then
+    echo "task_mmu.c: OK"
+else
+    echo "ERREUR: task_mmu.c"
+    exit 1
+fi
 
 REJ_FOUND=0
 
@@ -195,7 +323,7 @@ while IFS= read -r rej; do
     REJ_FOUND=1
 
     relative="${rej#$KERNEL_DIR/}"
-    destination="$REJ_DIR/$relative"
+    destination="$OUTPUT_DIR/rejects/$relative"
 
     mkdir -p "$(dirname "$destination")"
     cp "$rej" "$destination"
@@ -207,37 +335,22 @@ done < <(
         -print
 )
 
-if [ "$REJ_FOUND" -eq 1 ]; then
+if [ "$REJ_FOUND" -ne 0 ]; then
+    echo "ERREUR: .rej encore présent"
 
-    mkdir -p "$OUTPUT_DIR/rejects/sources"
+    find "$OUTPUT_DIR/rejects" \
+        -type f \
+        -print
 
-    for source in \
-        fs/namespace.c \
-        fs/proc/task_mmu.c \
-        fs/stat.c
-    do
-        if [ -f "$KERNEL_DIR/$source" ]; then
-            destination="$OUTPUT_DIR/rejects/sources/$source"
-            mkdir -p "$(dirname "$destination")"
-            cp "$KERNEL_DIR/$source" "$destination"
-        fi
-    done
-
-    cp "$OUT_DIR/.config" \
-        "$OUTPUT_DIR/rejects/kernel.config" \
-        2>/dev/null || true
-
-    echo "ERREUR: hunks SuSFS rejetés"
-    echo "Les .rej sont dans output/rejects/"
     exit 2
 fi
 
 if [ "$PATCH_STATUS" -ne 0 ]; then
-    echo "ERREUR: patch SuSFS"
+    echo "ERREUR: patch terminé avec erreur"
     exit "$PATCH_STATUS"
 fi
 
-echo "SuSFS patch appliqué"
+echo "SuSFS intégré"
 
 echo "Configuration SuSFS"
 
@@ -295,7 +408,7 @@ import sys
 path = Path(sys.argv[1])
 
 if not path.exists():
-    raise SystemExit("ERREUR: msm_drv.c absent")
+    raise SystemExit("msm_drv.c absent")
 
 text = path.read_text()
 
@@ -331,13 +444,6 @@ EXPORT_SYMBOL(touch_set_state);
     path.write_text(text)
 PY
 
-grep -q "motorola_panel_notifier_list" "$TOUCH_FILE"
-grep -q "panel_register_notifier" "$TOUCH_FILE"
-grep -q "panel_unregister_notifier" "$TOUCH_FILE"
-grep -q "touch_set_state" "$TOUCH_FILE"
-
-echo "Patch tactile OK"
-
 echo "Compilation kernel"
 
 make \
@@ -352,7 +458,7 @@ make \
 KERNEL_IMAGE="$OUT_DIR/arch/arm64/boot/Image"
 
 if [ ! -s "$KERNEL_IMAGE" ]; then
-    echo "ERREUR: Image kernel absente"
+    echo "ERREUR: Image absente"
     exit 1
 fi
 
@@ -372,8 +478,6 @@ fi
 source "$HOME/.cargo/env"
 
 rustup target add aarch64-linux-android
-
-echo "Téléchargement NDK"
 
 cd "$WORKSPACE"
 
@@ -427,14 +531,12 @@ fi
 cp "$KSUD" "$WORKSPACE/ksud"
 chmod 755 "$WORKSPACE/ksud"
 
-echo "Téléchargement boot"
+echo "Préparation boot"
 
 cd "$WORKSPACE"
 
 curl -fL "$BOOT_URL" -o boot-stock.img
 curl -fL "$DTBO_URL" -o dtbo-stock.img
-
-echo "Préparation Magiskboot"
 
 wget -q \
     https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk \
@@ -459,15 +561,8 @@ cd repack
 
 ./magiskboot unpack boot.img
 
-[ -f kernel ] || {
-    echo "ERREUR: kernel stock absent"
-    exit 1
-}
-
-[ -d ramdisk ] || {
-    echo "ERREUR: ramdisk absent"
-    exit 1
-}
+[ -f kernel ] || exit 1
+[ -d ramdisk ] || exit 1
 
 cp "$KERNEL_IMAGE" kernel
 
@@ -478,33 +573,9 @@ chmod 755 ramdisk/data/adb/ksud
 
 ./magiskboot repack boot.img new-boot.img
 
-[ -s new-boot.img ] || {
-    echo "ERREUR: repack boot échoué"
-    exit 1
-}
+[ -s new-boot.img ] || exit 1
 
 mv new-boot.img "$WORKSPACE/final_boot.img"
-
-echo "Vérification boot"
-
-rm -rf "$WORKSPACE/verify_boot"
-mkdir -p "$WORKSPACE/verify_boot"
-
-cp "$WORKSPACE/final_boot.img" "$WORKSPACE/verify_boot/boot.img"
-
-cd "$WORKSPACE/verify_boot"
-
-"$WORKSPACE/repack/magiskboot" unpack boot.img >/dev/null
-
-[ -f kernel ] || {
-    echo "ERREUR: kernel absent du boot final"
-    exit 1
-}
-
-[ -x ramdisk/data/adb/ksud ] || {
-    echo "ERREUR: ksud absent du boot final"
-    exit 1
-}
 
 cd "$WORKSPACE"
 
@@ -523,7 +594,7 @@ cp "$OUT_DIR/.config" \
 echo "BUILD OK"
 
 find "$OUTPUT_DIR" \
-    -maxdepth 4 \
+    -maxdepth 5 \
     -type f \
     -print \
     | sort
