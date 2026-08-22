@@ -8,12 +8,16 @@ KERNEL_DIR="$WORKSPACE/kernel_sources"
 OUT_DIR="$KERNEL_DIR/out"
 OUTPUT_DIR="$WORKSPACE/output"
 JACK_DIR="$WORKSPACE/NonGKI_Kernel_Build_2nd"
-KSUD_DIR="$KERNEL_DIR/KernelSU"
+KSU_DIR="$WORKSPACE/KernelSU"
 
 KERNEL_REPO="https://github.com/LineageOS/android_kernel_motorola_sm8250.git"
 KERNEL_BRANCH="lineage-23.2"
+
 JACK_REPO="https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd.git"
 JACK_BRANCH="mainline"
+
+KSU_REPO="https://github.com/backslashxx/KernelSU.git"
+KSU_REF="v3.2.5-67"
 
 DEFCONFIG="vendor/lito-perf_defconfig"
 
@@ -27,6 +31,7 @@ export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
 rm -rf "$KERNEL_DIR"
 rm -rf "$JACK_DIR"
+rm -rf "$KSU_DIR"
 rm -rf "$OUTPUT_DIR"
 rm -rf "$WORKSPACE/repack"
 rm -rf "$WORKSPACE/magisk_extract"
@@ -84,7 +89,26 @@ git clone \
     "$JACK_REPO" \
     "$JACK_DIR"
 
+echo "Clonage Backslashxx KernelSU"
+
+git clone \
+    "$KSU_REPO" \
+    "$KSU_DIR"
+
+cd "$KSU_DIR"
+
+git fetch --tags --force
+
+git checkout "$KSU_REF"
+
+echo "KernelSU: $(git describe --tags --always)"
+
 cd "$KERNEL_DIR"
+
+if [ ! -f "arch/arm64/configs/$DEFCONFIG" ]; then
+    echo "ERREUR: $DEFCONFIG introuvable"
+    exit 1
+fi
 
 KERNEL_VERSION="$(
     awk '
@@ -95,48 +119,30 @@ KERNEL_VERSION="$(
 )"
 
 if [ "$KERNEL_VERSION" != "4.19" ]; then
-    echo "ERREUR: kernel détecté: $KERNEL_VERSION"
-    exit 1
-fi
-
-if [ ! -f "arch/arm64/configs/$DEFCONFIG" ]; then
-    echo "ERREUR: $DEFCONFIG absent"
+    echo "ERREUR: kernel $KERNEL_VERSION"
     exit 1
 fi
 
 echo "Kernel 4.19 OK"
 
-echo "Clonage Backslashxx KernelSU"
+echo "Integration KernelSU"
 
-git clone \
-    https://github.com/backslashxx/KernelSU.git \
-    "$KSUD_DIR"
+bash "$KSU_DIR/kernel/setup.sh" "$KSU_REF"
 
-cd "$KSUD_DIR"
-
-git fetch --tags --force
-
-if git rev-parse --verify v3.2.5-67 >/dev/null 2>&1; then
-    git checkout v3.2.5-67
-fi
-
-echo "KernelSU commit:"
-git rev-parse --short HEAD
-
-cd "$KERNEL_DIR"
-
-echo "Intégration KernelSU"
-
-bash "$KSUD_DIR/kernel/setup.sh"
-
-if [ ! -d "$KERNEL_DIR/drivers/kernelsu" ]; then
-    echo "ERREUR: drivers/kernelsu absent après setup.sh"
+if [ ! -L "$KERNEL_DIR/drivers/kernelsu" ] &&
+   [ ! -d "$KERNEL_DIR/drivers/kernelsu" ]; then
+    echo "ERREUR: drivers/kernelsu absent"
     exit 1
 fi
 
-echo "KernelSU intégré"
+if [ ! -f "$KERNEL_DIR/drivers/kernelsu/Kconfig" ]; then
+    echo "ERREUR: drivers/kernelsu/Kconfig absent"
+    exit 1
+fi
 
-echo "Configuration initiale"
+echo "KernelSU integre"
+
+echo "Configuration kernel"
 
 make \
     O="$OUT_DIR" \
@@ -146,13 +152,13 @@ make \
     "$DEFCONFIG"
 
 scripts/config --file "$OUT_DIR/.config" \
-    --enable KSU \
     --enable KPROBES \
     --enable KALLSYMS \
     --enable KALLSYMS_ALL \
     --enable EXT4_FS \
     --enable COMPAT \
-    --enable COMPAT_32BIT_TIME
+    --enable COMPAT_32BIT_TIME \
+    --enable KSU
 
 make \
     O="$OUT_DIR" \
@@ -160,8 +166,6 @@ make \
     CROSS_COMPILE="$CROSS_COMPILE" \
     CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
     olddefconfig
-
-echo "Vérification KSU"
 
 grep -q '^CONFIG_KPROBES=y$' "$OUT_DIR/.config"
 grep -q '^CONFIG_KSU=y$' "$OUT_DIR/.config"
@@ -171,22 +175,14 @@ echo "KPROBES=OK"
 echo "KSU=OK"
 echo "EXT4_FS=OK"
 
-echo "Application SuSFS JackA1ltman"
+echo "Application SuSFS"
 
-PATCH_419="$(
-    find "$JACK_DIR/Patches" \
-        -type f \
-        -name 'susfs_patch_to_4.19.patch' \
-        | head -1
-)"
+PATCH_FILE="$JACK_DIR/Patches/Patch/susfs_patch_to_4.19.patch"
 
-if [ -z "$PATCH_419" ]; then
-    echo "ERREUR: susfs_patch_to_4.19.patch introuvable"
-    find "$JACK_DIR/Patches" -type f -name '*.patch' | head -30
+if [ ! -f "$PATCH_FILE" ]; then
+    echo "ERREUR: patch SuSFS absent"
     exit 1
 fi
-
-echo "Patch: $PATCH_419"
 
 PATCH_LOG="$OUTPUT_DIR/susfs-patch.log"
 
@@ -195,95 +191,64 @@ set +e
 patch \
     -p1 \
     --forward \
-    < "$PATCH_419" \
+    --reject-file="$KERNEL_DIR/susfs-current.rej" \
+    < "$PATCH_FILE" \
     2>&1 | tee "$PATCH_LOG"
 
-PATCH_RESULT=${PIPESTATUS[0]}
+PATCH_STATUS=${PIPESTATUS[0]}
 
 set -e
-
-echo "Sauvegarde des rejets initiaux"
 
 find "$KERNEL_DIR" \
     -type f \
     -name '*.rej' \
     -print0 |
-while IFS= read -r -d '' rej
+while IFS= read -r -d '' f
 do
-    rel="${rej#$KERNEL_DIR/}"
-    dest="$OUTPUT_DIR/rejects/$rel"
-
-    mkdir -p "$(dirname "$dest")"
-    cp "$rej" "$dest"
+    rel="${f#$KERNEL_DIR/}"
+    mkdir -p "$OUTPUT_DIR/rejects/$(dirname "$rel")"
+    cp "$f" "$OUTPUT_DIR/rejects/$rel"
 done
+
+if [ "$PATCH_STATUS" -ne 0 ]; then
+    echo "Le patch contient des rejets connus; correction des deux incompatibilites 4.19"
+fi
 
 echo "Correction namespace.c"
 
 python3 <<'PY'
 from pathlib import Path
-import re
 
 p = Path("fs/namespace.c")
 s = p.read_text()
 
-include_anchor = "#include <linux/sched/task.h>"
+include = "#include <linux/sched/task.h>"
 
-if "susfs_is_current_ksu_domain" not in s:
-    if include_anchor not in s:
-        raise SystemExit("namespace.c: include anchor absent")
-
-    block = r'''
+susfs_declarations = r'''
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 #include <linux/susfs_def.h>
-#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+#endif
 
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 extern bool susfs_is_current_ksu_domain(void);
 extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
 
-#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */
-
-#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+#define CL_COPY_MNT_NS BIT(25)
+#endif
 '''
 
+if "susfs_is_current_ksu_domain" not in s:
+    if include not in s:
+        raise SystemExit("namespace.c: include anchor introuvable")
+
     s = s.replace(
-        include_anchor,
-        include_anchor + "\n" + block,
+        include,
+        include + "\n" + susfs_declarations,
         1
     )
 
-if "susfs_alloc_non_unshare_ksu_vfsmnt" not in s:
-
-    fn = re.search(
-        r'vfs_kern_mount\s*\([^)]*\)\s*\{',
-        s
-    )
-
-    if not fn:
-        raise SystemExit(
-            "namespace.c: vfs_kern_mount introuvable"
-        )
-
-    start = fn.end()
-
-    type_check = re.search(
-        r'\n\s*if\s*\(\s*!type\s*\)\s*'
-        r'return\s+ERR_PTR\s*\(\s*-ENODEV\s*\)\s*;',
-        s[start:],
-        re.S
-    )
-
-    if not type_check:
-        raise SystemExit(
-            "namespace.c: test !type introuvable"
-        )
-
-    pos = start + type_check.end()
-
-    block = r'''
-
+mount_block = r'''
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-	/* SusFS mount bypass for KSU domain. */
 	if (static_branch_unlikely(
 			&susfs_is_sdcard_android_data_not_decrypted)) {
 		if (susfs_is_current_ksu_domain()) {
@@ -293,23 +258,34 @@ if "susfs_alloc_non_unshare_ksu_vfsmnt" not in s:
 		}
 	}
 #endif
+
 '''
 
-    s = s[:pos] + block + s[pos:]
+if "susfs_alloc_non_unshare_ksu_vfsmnt(name" not in s:
+    anchor = "\n\tmnt = alloc_vfsmnt(name);"
 
-if "bypass_orig_flow:" not in s:
-
-    mnt = re.search(
-        r'\n\s*mnt\s*=\s*alloc_vfsmnt\s*\(\s*name\s*\)\s*;',
-        s
-    )
-
-    if not mnt:
+    if anchor not in s:
         raise SystemExit(
-            "namespace.c: alloc_vfsmnt introuvable"
+            "namespace.c: alloc_vfsmnt(name) introuvable"
         )
 
-    pos = mnt.end()
+    s = s.replace(
+        anchor,
+        "\n" + mount_block + "\tmnt = alloc_vfsmnt(name);",
+        1
+    )
+
+if "bypass_orig_flow:" not in s:
+    anchor = "\n\tmnt = alloc_vfsmnt(name);"
+
+    pos = s.find(anchor)
+
+    if pos < 0:
+        raise SystemExit(
+            "namespace.c: point bypass introuvable"
+        )
+
+    end = pos + len(anchor)
 
     label = r'''
 
@@ -318,128 +294,194 @@ bypass_orig_flow:
 #endif
 '''
 
-    s = s[:pos] + label + s[pos:]
+    s = s[:end] + label + s[end:]
 
 p.write_text(s)
-
-print("namespace.c corrigé")
 PY
 
 echo "Correction task_mmu.c"
 
 python3 <<'PY'
 from pathlib import Path
-import re
 
 p = Path("fs/proc/task_mmu.c")
 s = p.read_text()
 
-if "SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))" not in s:
-
-    fn = re.search(
-        r'static\s+ssize_t\s+pagemap_read\s*\(',
-        s
-    )
-
-    if not fn:
-        raise SystemExit(
-            "task_mmu.c: pagemap_read introuvable"
-        )
-
-    start = fn.start()
-
-    end = s.find("\n}", start)
-
-    if end < 0:
-        raise SystemExit(
-            "task_mmu.c: fin pagemap_read introuvable"
-        )
-
-    body = s[start:end]
-
-    anchor = re.search(
-        r'\n\s*ret\s*=\s*down_read_killable\s*\(&mm->mmap_sem\)\s*;'
-        r'\s*if\s*\(\s*ret\s*\)'
-        r'\s*goto\s+out_free\s*;',
-        body,
-        re.S
-    )
-
-    if not anchor:
-        raise SystemExit(
-            "task_mmu.c: anchor down_read_killable introuvable"
-        )
-
-    pos = start + anchor.end()
-
-    block = r'''
+susfs_block = r'''
 #ifdef CONFIG_KSU_SUSFS_SUS_MAP
 		vma = find_vma(mm, start_vaddr);
 		if (vma && vma->vm_file &&
 		    SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
 			goto bypass_orig_flow;
-#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+#endif
 '''
 
-    s = s[:pos] + block + s[pos:]
+if "SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))" not in s:
+
+    anchor = """\t\tret = down_read_killable(&mm->mmap_sem);
+\t\tif (ret)
+\t\t\tgoto out_free;"""
+
+    if anchor not in s:
+        raise SystemExit(
+            "task_mmu.c: anchor down_read_killable introuvable"
+        )
+
+    s = s.replace(
+        anchor,
+        anchor + susfs_block,
+        1
+    )
 
 if "bypass_orig_flow:" not in s:
 
-    fn = re.search(
-        r'static\s+ssize_t\s+pagemap_read\s*\(',
-        s
-    )
+    anchor = "\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);"
 
-    start = fn.start()
-    end = s.find("\n}", start)
-
-    body = s[start:end]
-
-    walk = re.search(
-        r'\n\s*ret\s*=\s*walk_page_range\s*\('
-        r'.*?'
-        r'\)\s*;',
-        body,
-        re.S
-    )
-
-    if not walk:
+    if anchor not in s:
         raise SystemExit(
             "task_mmu.c: walk_page_range introuvable"
         )
 
-    pos = start + walk.end()
-
-    label = r'''
+    s = s.replace(
+        anchor,
+        anchor + r'''
 #ifdef CONFIG_KSU_SUSFS_SUS_MAP
 bypass_orig_flow:
-#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
-'''
-
-    s = s[:pos] + label + s[pos:]
+#endif
+''',
+        1
+    )
 
 p.write_text(s)
-
-print("task_mmu.c corrigé")
 PY
 
-echo "Suppression des rejets consommés"
+echo "Suppression uniquement des rejets resolus"
 
-find "$KERNEL_DIR" \
-    -type f \
-    -name '*.rej' \
-    -delete
+rm -f "$KERNEL_DIR/fs/namespace.c.rej"
+rm -f "$KERNEL_DIR/fs/proc/task_mmu.c.rej"
+rm -f "$KERNEL_DIR/susfs-current.rej"
 
-if find "$KERNEL_DIR" -type f -name '*.rej' | grep -q .; then
-    echo "ERREUR: .rej encore présent"
+REMAINING_REJ=0
+
+while IFS= read -r -d '' rej
+do
+    rel="${rej#$KERNEL_DIR/}"
+    mkdir -p "$OUTPUT_DIR/rejects/$(dirname "$rel")"
+    cp "$rej" "$OUTPUT_DIR/rejects/$rel"
+    echo "ERREUR: rejet non resolu: $rel"
+    REMAINING_REJ=1
+done < <(find "$KERNEL_DIR" -type f -name '*.rej' -print0)
+
+if [ "$REMAINING_REJ" -ne 0 ]; then
     exit 1
 fi
 
-echo "SuSFS corrections OK"
+echo "Tous les rejets sont resolus"
+
+echo "Ajout Kconfig SuSFS"
+
+KSU_KCONFIG="$KERNEL_DIR/drivers/kernelsu/Kconfig"
+
+python3 <<'PY'
+from pathlib import Path
+
+p = Path("drivers/kernelsu/Kconfig")
+s = p.read_text()
+
+if "config KSU_SUSFS" not in s:
+
+    marker = "\nendmenu"
+
+    if marker not in s:
+        raise SystemExit(
+            "Kconfig KernelSU: endmenu introuvable"
+        )
+
+    susfs = r'''
+menu "KernelSU - SUSFS"
+
+config KSU_SUSFS
+	bool "KernelSU addon - SUSFS"
+	depends on KSU
+	depends on THREAD_INFO_IN_TASK
+	default y
+	help
+	  Patch and enable SUSFS with KernelSU.
+
+config KSU_SUSFS_SUS_PATH
+	bool "Enable to hide suspicious path"
+	depends on KSU_SUSFS
+	default y
+
+config KSU_SUSFS_SUS_MOUNT
+	bool "Enable to hide suspicious mounts"
+	depends on KSU_SUSFS
+	default y
+
+config KSU_SUSFS_SUS_KSTAT
+	bool "Enable to spoof suspicious kstat"
+	depends on KSU_SUSFS
+	default y
+
+config KSU_SUSFS_SPOOF_UNAME
+	bool "Enable to spoof uname"
+	depends on KSU_SUSFS
+	default y
+
+config KSU_SUSFS_ENABLE_LOG
+	bool "Enable SUSFS logging"
+	depends on KSU_SUSFS
+	default y
+
+config KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+	bool "Hide KernelSU and SUSFS symbols"
+	depends on KSU_SUSFS
+	default y
+
+config KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+	bool "Spoof cmdline or bootconfig"
+	depends on KSU_SUSFS
+	default y
+
+config KSU_SUSFS_OPEN_REDIRECT
+	bool "Enable open redirect"
+	depends on KSU_SUSFS
+	default y
+
+config KSU_SUSFS_SUS_MAP
+	bool "Enable SUS map hiding"
+	depends on KSU_SUSFS
+	default y
+
+endmenu
+'''
+
+    pos = s.rfind(marker)
+
+    s = s[:pos] + "\n" + susfs + s[pos:]
+
+    p.write_text(s)
+
+    print("Kconfig SuSFS ajoute")
+else:
+    print("Kconfig SuSFS deja present")
+PY
 
 echo "Activation SuSFS"
 
+make \
+    O="$OUT_DIR" \
+    LLVM=1 \
+    CROSS_COMPILE="$CROSS_COMPILE" \
+    CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+    olddefconfig
+
 scripts/config --file "$OUT_DIR/.config" \
+    --enable KSU \
+    --enable KPROBES \
+    --enable KALLSYMS \
+    --enable KALLSYMS_ALL \
+    --enable EXT4_FS \
     --enable KSU_SUSFS \
     --enable KSU_SUSFS_SUS_PATH \
     --enable KSU_SUSFS_SUS_MOUNT \
@@ -458,13 +500,14 @@ make \
     CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
     olddefconfig
 
-echo "Vérification SuSFS"
+echo "Verification configuration"
 
-for c in \
-    CONFIG_KSU \
+for cfg in \
     CONFIG_KPROBES \
+    CONFIG_KSU \
     CONFIG_KALLSYMS \
     CONFIG_KALLSYMS_ALL \
+    CONFIG_EXT4_FS \
     CONFIG_KSU_SUSFS \
     CONFIG_KSU_SUSFS_SUS_PATH \
     CONFIG_KSU_SUSFS_SUS_MOUNT \
@@ -476,20 +519,23 @@ for c in \
     CONFIG_KSU_SUSFS_OPEN_REDIRECT \
     CONFIG_KSU_SUSFS_SUS_MAP
 do
-    if ! grep -q "^${c}=y$" "$OUT_DIR/.config"; then
-        echo "ERREUR: $c absent"
+    if ! grep -q "^${cfg}=y$" "$OUT_DIR/.config"; then
+        echo "ERREUR: $cfg absent"
+        cp "$OUT_DIR/.config" "$OUTPUT_DIR/kernel.config"
         exit 1
     fi
 done
 
-echo "SuSFS configuration OK"
+cp "$OUT_DIR/.config" "$OUTPUT_DIR/kernel.config"
+
+echo "Configuration SuSFS OK"
 
 echo "Patch tactile Motorola"
 
 TOUCH_FILE="$KERNEL_DIR/techpack/display/msm/msm_drv.c"
 
 if [ ! -f "$TOUCH_FILE" ]; then
-    echo "ERREUR: $TOUCH_FILE absent"
+    echo "ERREUR: msm_drv.c absent"
     exit 1
 fi
 
@@ -500,7 +546,6 @@ p = Path("techpack/display/msm/msm_drv.c")
 s = p.read_text()
 
 if "motorola_panel_notifier_list" not in s:
-
     s += r'''
 
 #include <linux/notifier.h>
@@ -586,7 +631,7 @@ export AR_PATH="$NDK_HOST/bin/llvm-ar"
 
 export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$NDK_HOST/sysroot -I$NDK_HOST/sysroot/usr/include/aarch64-linux-android"
 
-cd "$KSUD_DIR/userspace/ksud"
+cd "$KSU_DIR/userspace/ksud"
 
 mkdir -p .cargo
 
@@ -607,7 +652,7 @@ cargo build \
     --manifest-path Cargo.toml \
     2>&1 | tee "$OUTPUT_DIR/ksud-build.log"
 
-KSUD="$KSUD_DIR/userspace/ksud/target/aarch64-linux-android/release/ksud"
+KSUD="$KSU_DIR/userspace/ksud/target/aarch64-linux-android/release/ksud"
 
 if [ ! -s "$KSUD" ]; then
     echo "ERREUR: ksud absent"
@@ -616,20 +661,14 @@ fi
 
 cp "$KSUD" "$WORKSPACE/ksud"
 chmod 755 "$WORKSPACE/ksud"
-
 cp "$WORKSPACE/ksud" "$OUTPUT_DIR/ksud"
 
-echo "Téléchargement boot stock"
+echo "Repack boot"
 
 cd "$WORKSPACE"
 
-curl -fL \
-    "$BOOT_URL" \
-    -o boot-stock.img
-
-curl -fL \
-    "$DTBO_URL" \
-    -o dtbo-stock.img
+curl -fL "$BOOT_URL" -o boot-stock.img
+curl -fL "$DTBO_URL" -o dtbo-stock.img
 
 mkdir -p repack
 mkdir -p magisk_extract
@@ -662,15 +701,18 @@ fi
 
 cp "$KERNEL_IMAGE" kernel
 
-mkdir -p ramdisk/data/adb
+mkdir -p ramdisk/data/adb/ksud
 
-cp "$WORKSPACE/ksud" ramdisk/data/adb/ksud
-chmod 755 ramdisk/data/adb/ksud
+cp "$WORKSPACE/ksud" \
+    ramdisk/data/adb/ksud/ksud
+
+chmod 755 \
+    ramdisk/data/adb/ksud/ksud
 
 ./magiskboot repack boot.img new-boot.img
 
 if [ ! -s new-boot.img ]; then
-    echo "ERREUR: repack boot échoué"
+    echo "ERREUR: nouveau boot absent"
     exit 1
 fi
 
@@ -684,10 +726,20 @@ cp final_boot.img \
 cp dtbo-stock.img \
     "$OUTPUT_DIR/dtbo.img"
 
-cp "$OUT_DIR/.config" \
-    "$OUTPUT_DIR/kernel.config"
+echo "Diagnostics"
 
-echo "Build terminé"
+find "$KERNEL_DIR" \
+    -type f \
+    -name '*.rej' \
+    -print0 |
+while IFS= read -r -d '' rej
+do
+    rel="${rej#$KERNEL_DIR/}"
+    mkdir -p "$OUTPUT_DIR/rejects/$(dirname "$rel")"
+    cp "$rej" "$OUTPUT_DIR/rejects/$rel"
+done
+
+echo "Build termine"
 
 find "$OUTPUT_DIR" \
     -type f \
