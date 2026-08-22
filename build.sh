@@ -8,7 +8,7 @@ sudo apt-get clean
 sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.list 2>/dev/null || true
 
 sudo apt-get update
-sudo apt-get install -y bc bison build-essential ccache flex glibc-source libelf-dev libssl-dev libncurses-dev gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi clang llvm lld device-tree-compiler zip unzip curl git python3 mkbootimg perl
+sudo apt-get install -y bc bison build-essential ccache flex glibc-source libelf-dev libssl-dev libncurses-dev gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi clang llvm lld device-tree-compiler zip unzip curl git python3 mkbootimg perl cpio
 
 cd $GITHUB_WORKSPACE
 
@@ -40,14 +40,12 @@ hook_insert() {
 
 HOOKS_FAILED=0
 
-# Hook exec.c (Version originale qui compile)
 hook_insert "fs/exec.c" \
   '(?s)static int do_execveat_common\(.*?int flags\)\s*\n\{' \
   '#ifdef CONFIG_KSU\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,\n\t\t\t\t\t void *envp, int *flags);\n#endif\n' \
   'ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);' \
   || HOOKS_FAILED=1
 
-# Hook open.c
 if grep -Pzo 'long do_faccessat\(int dfd, const char __user \*filename, int mode\)\s*\n\{' fs/open.c > /dev/null 2>&1; then
   hook_insert "fs/open.c" \
     'long do_faccessat\(int dfd, const char __user \*filename, int mode\)\s*\n\{' \
@@ -64,7 +62,6 @@ else
   HOOKS_FAILED=1
 fi
 
-# Hook stat.c
 if grep -Pzo 'int vfs_statx\(int dfd, const char __user \*filename, int flags,' fs/stat.c > /dev/null 2>&1; then
   hook_insert "fs/stat.c" \
     'int vfs_statx\(int dfd, const char __user \*filename, int flags,[^{]*\{' \
@@ -101,11 +98,6 @@ if [ -n "$PATCH_419" ]; then
 else
   echo "Aucun patch 4.19 trouvé."
 fi
-
-echo "=== Vérification des .rej ==="
-find . -name "*.rej" -type f | while read rej; do
-  echo "⚠️ REJ détecté: $rej"
-done
 
 echo "=== Corrections post-patch ==="
 sed -i '1617d' fs/proc/task_mmu.c 2>/dev/null || true
@@ -222,8 +214,6 @@ if [ -f "$KSUD_BINARY" ]; then
   echo "OK: ksud compilé"
 fi
 
-cd "$GITHUB_WORKSPACE/kernel_sources"
-
 echo "=== Repack boot.img ==="
 cd $GITHUB_WORKSPACE
 curl -fLo boot-stock.img "https://mirrorbits.lineageos.org/full/kiev/20260809/boot.img" 2>/dev/null || true
@@ -238,27 +228,33 @@ if [ -f "boot-stock.img" ]; then
   rm -rf Magisk-v27.0.apk lib/
   cd repack
   
-  # CORRECTION : Ignorer l'erreur ASN.1 DER tag de magiskboot
-  # Le unpack fonctionne malgré le warning
-  ./magiskboot unpack boot.img || {
-    echo "⚠️ magiskboot a affiché un warning mais continue..."
-    # Vérifier quand même que les fichiers essentiels sont là
-    if [ ! -f "kernel" ] || [ ! -f "ramdisk.cpio" ]; then
-      echo "❌ Échec réel du unpack (fichiers manquants)"
-      exit 1
-    fi
-    echo "✅ Fichiers extraits malgré le warning"
-  }
+  # CORRECTION CRUCIALE : Ignorer le warning ASN.1 DER tag de magiskboot
+  set +e
+  ./magiskboot unpack boot.img
+  UNPACK_EXIT=$?
+  set -e
+  
+  # Vérifier que le unpack a quand même fonctionné
+  if [ ! -f "kernel" ] || [ ! -f "ramdisk.cpio" ]; then
+    echo "❌ Échec réel du unpack (fichiers manquants)"
+    exit 1
+  fi
+  
+  if [ $UNPACK_EXIT -ne 0 ]; then
+    echo "⚠️ magiskboot a renvoyé un warning (code $UNPACK_EXIT) mais les fichiers sont extraits"
+  fi
+  echo "✅ Boot image décompressée"
   
   # Remplacer le noyau
   cp $GITHUB_WORKSPACE/kernel_sources/out/arch/arm64/boot/Image kernel
+  echo "✅ Noyau remplacé"
   
   # Ajouter ksud et su au ramdisk
   if [ -f "$GITHUB_WORKSPACE/ksud" ]; then
     # Extraire le ramdisk
     mkdir -p ramdisk_extracted
     cd ramdisk_extracted
-    cpio -idm < ../ramdisk.cpio
+    gzip -dc ../ramdisk.cpio 2>/dev/null | cpio -idm || cpio -idm < ../ramdisk.cpio
     
     # Ajouter ksud
     mkdir -p data/adb/ksud
@@ -271,7 +267,7 @@ if [ -f "boot-stock.img" ]; then
     chmod 6755 system/bin/su
     
     # Reconstruire le ramdisk
-    find . | cpio -o -H newc > ../ramdisk.cpio.new
+    find . | cpio -o -H newc | gzip > ../ramdisk.cpio.new
     cd ..
     mv ramdisk.cpio.new ramdisk.cpio
     rm -rf ramdisk_extracted
@@ -287,6 +283,7 @@ if [ -f "boot-stock.img" ]; then
   
   mv new-boot.img ../final_boot.img
   cd ..
+  echo "✅ Boot image repackée avec succès"
 fi
 
 echo "=== Copie vers output ==="
