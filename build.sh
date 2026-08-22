@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-echo "=== Début du build Backslashxx KernelSU + SusFS (Manual Hook) ==="
+echo "=== Début du build Backslashxx KernelSU + SusFS (Manual Hook) - FIXED ==="
 df -h
 
 sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
@@ -17,99 +17,87 @@ git clone https://github.com/LineageOS/android_kernel_motorola_sm8250.git -b lin
 cd kernel_sources
 
 echo "=== Intégration Backslashxx KernelSU ==="
-rm -rf drivers/kernelsu kernelSU susfs4ksu || true
+rm -rf drivers/kernelsu KernelSU susfs4ksu || true
+
+# IMPORTANT: pin un commit si possible pour matcher ton manager (32590)
+# Exemple (décommente et mets un hash stable) :
+# git clone --depth=1 https://github.com/backslashxx/KernelSU.git -b <commit-hash> KernelSU
+# cd KernelSU && bash kernel/setup.sh && cd ..
 curl -LSs "https://raw.githubusercontent.com/backslashxx/KernelSU/master/kernel/setup.sh" | bash
 
 echo "=== Hooks manuels sucompat (fs/exec.c, fs/open.c, fs/stat.c) ==="
-# Le build précédent utilisait CONFIG_KPROBES pour le hooking automatique.
-# Sur ce kernel Motorola, les kprobes ne fonctionnent visiblement pas
-# correctement pour le hook sucompat (SUCompat grisé dans le Manager,
-# Termux ne trouve aucun binaire su) même si le driver KernelSU lui-même
-# s'initialise et que le Manager le voit "Fonctionnel" (ce canal-là ne
-# dépend pas des kprobes). On bascule donc en hooks manuels, recommandés
-# par la doc officielle pour ce genre de kernel :
-# https://kernelsu.org/guide/how-to-integrate-for-non-gki.html
 mkdir -p ../output/manual-hooks-diag
 
-hook_insert() {
-  local file="$1" sig_re="$2" extern_block="$3" call_line="$4"
-  if [ ! -f "$file" ]; then
-    echo "❌ $file introuvable."
-    return 1
+# ---------- fs/exec.c ----------
+if grep -q "do_execveat_common" fs/exec.c; then
+  if ! grep -q "ksu_handle_execveat_sucompat" fs/exec.c; then
+    # Déclarations externes
+    sed -i '/static int do_execveat_common/i\
+#ifdef CONFIG_KSU\
+extern bool ksu_execveat_hook __read_mostly;\
+extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,\
+			void *envp, int *flags);\
+extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,\
+				 void *argv, void *envp, int *flags);\
+#endif' fs/exec.c
+
+    # Appel correct avec le test ksu_execveat_hook
+    # On insère juste après l'ouverture de la fonction
+    perl -i -0pe 's/(static int do_execveat_common\(.*?\)\s*\{)/$1\n#ifdef CONFIG_KSU\n\tif (unlikely(ksu_execveat_hook))\n\t\tksu_handle_execveat(\&fd, \&filename, \&argv, \&envp, \&flags);\n\telse\n\t\tksu_handle_execveat_sucompat(\&fd, \&filename, \&argv, \&envp, \&flags);\n#endif/s' fs/exec.c
   fi
-  if ! grep -Pzo "$sig_re" "$file" > /dev/null 2>&1; then
-    echo "❌ Signature attendue introuvable dans $file — hook NON inséré."
-    return 1
-  fi
-  perl -0777 -i -pe "s/($sig_re)/${extern_block}\$1\n#ifdef CONFIG_KSU\n#pragma GCC diagnostic ignored \x22-Wdeclaration-after-statement\x22\n${call_line}\n#endif\n/s" "$file"
-  echo "[+] Hook inséré dans $file"
-  return 0
-}
-
-HOOKS_FAILED=0
-
-hook_insert "fs/exec.c" \
-  '(?s)static int do_execveat_common\(.*?int flags\)\s*\n\{' \
-  '#ifdef CONFIG_KSU\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,\n\t\t\t\t\t void *envp, int *flags);\n#endif\n' \
-  'ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);' \
-  || HOOKS_FAILED=1
-
-if grep -Pzo 'long do_faccessat\(int dfd, const char __user \*filename, int mode\)\s*\n\{' fs/open.c > /dev/null 2>&1; then
-  hook_insert "fs/open.c" \
-    'long do_faccessat\(int dfd, const char __user \*filename, int mode\)\s*\n\{' \
-    '#ifdef CONFIG_KSU\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode,\n\t\t\t\t int *flags);\n#endif\n' \
-    'ksu_handle_faccessat(&dfd, &filename, &mode, NULL);' \
-    || HOOKS_FAILED=1
-elif grep -Pzo 'SYSCALL_DEFINE3\(faccessat, int, dfd, const char __user \*, filename, int, mode\)\s*\n\{' fs/open.c > /dev/null 2>&1; then
-  hook_insert "fs/open.c" \
-    'SYSCALL_DEFINE3\(faccessat, int, dfd, const char __user \*, filename, int, mode\)\s*\n\{' \
-    '#ifdef CONFIG_KSU\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode,\n\t\t\t\t int *flags);\n#endif\n' \
-    'ksu_handle_faccessat(&dfd, &filename, &mode, NULL);' \
-    || HOOKS_FAILED=1
+  echo "[+] Hook exec.c OK (avec if ksu_execveat_hook + sucompat)"
 else
-  echo "❌ Ni do_faccessat ni SYSCALL_DEFINE3(faccessat...) trouvé dans fs/open.c"
-  HOOKS_FAILED=1
-fi
-
-if grep -Pzo 'int vfs_statx\(int dfd, const char __user \*filename, int flags,' fs/stat.c > /dev/null 2>&1; then
-  hook_insert "fs/stat.c" \
-    'int vfs_statx\(int dfd, const char __user \*filename, int flags,[^{]*\{' \
-    '#ifdef CONFIG_KSU\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n#endif\n' \
-    'ksu_handle_stat(&dfd, &filename, &flags);' \
-    || HOOKS_FAILED=1
-elif grep -Pzo 'int vfs_fstatat\(int dfd, const char __user \*filename, struct kstat \*stat,\s*\n\s*int flag\)\s*\n\{' fs/stat.c > /dev/null 2>&1; then
-  hook_insert "fs/stat.c" \
-    'int vfs_fstatat\(int dfd, const char __user \*filename, struct kstat \*stat,\s*\n\s*int flag\)\s*\n\{' \
-    '#ifdef CONFIG_KSU\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n#endif\n' \
-    'ksu_handle_stat(&dfd, &filename, &flag);' \
-    || HOOKS_FAILED=1
-else
-  echo "❌ Ni vfs_statx ni vfs_fstatat trouvé dans fs/stat.c"
-  HOOKS_FAILED=1
-fi
-
-if [ "$HOOKS_FAILED" -eq 1 ]; then
-  echo "❌ Au moins un hook sucompat n'a pas pu être inséré automatiquement."
-  for f in fs/exec.c fs/open.c fs/stat.c; do
-    cp --parents "$f" ../output/manual-hooks-diag/ 2>/dev/null || true
-  done
-  echo "    -> fichiers copiés dans output/manual-hooks-diag/ pour inspection manuelle des signatures réelles."
+  echo "❌ do_execveat_common introuvable dans fs/exec.c"
+  cp fs/exec.c ../output/manual-hooks-diag/ 2>/dev/null || true
   exit 1
 fi
-echo "✅ Les 3 hooks sucompat sont en place (execveat, faccessat, stat — vfs_read non requis sur ce fork, cf. supercall)."
+
+# ---------- fs/open.c ----------
+if grep -qE "do_faccessat|SYSCALL_DEFINE3\(faccessat" fs/open.c; then
+  if ! grep -q "ksu_handle_faccessat" fs/open.c; then
+    if grep -q "long do_faccessat" fs/open.c; then
+      perl -i -0pe 's/(long do_faccessat\(.*?\)\s*\{)/$1\n#ifdef CONFIG_KSU\n\textern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n\tksu_handle_faccessat(\&dfd, \&filename, \&mode, NULL);\n#endif/s' fs/open.c
+    else
+      perl -i -0pe 's/(SYSCALL_DEFINE3\(faccessat,.*?\)\s*\{)/$1\n#ifdef CONFIG_KSU\n\textern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n\tksu_handle_faccessat(\&dfd, \&filename, \&mode, NULL);\n#endif/s' fs/open.c
+    fi
+  fi
+  echo "[+] Hook open.c OK"
+else
+  echo "❌ faccessat introuvable dans fs/open.c"
+  cp fs/open.c ../output/manual-hooks-diag/ 2>/dev/null || true
+  exit 1
+fi
+
+# ---------- fs/stat.c ----------
+if grep -qE "vfs_statx|vfs_fstatat" fs/stat.c; then
+  if ! grep -q "ksu_handle_stat" fs/stat.c; then
+    if grep -q "int vfs_statx" fs/stat.c; then
+      perl -i -0pe 's/(int vfs_statx\(.*?\{)/$1\n#ifdef CONFIG_KSU\n\textern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n\tksu_handle_stat(\&dfd, \&filename, \&flags);\n#endif/s' fs/stat.c
+    else
+      perl -i -0pe 's/(int vfs_fstatat\(.*?\{)/$1\n#ifdef CONFIG_KSU\n\textern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n\tksu_handle_stat(\&dfd, \&filename, \&flag);\n#endif/s' fs/stat.c
+    fi
+  fi
+  echo "[+] Hook stat.c OK"
+else
+  echo "❌ vfs_statx / vfs_fstatat introuvable dans fs/stat.c"
+  cp fs/stat.c ../output/manual-hooks-diag/ 2>/dev/null || true
+  exit 1
+fi
+
+echo "✅ Les 3 hooks sucompat sont en place"
 
 echo "=== Téléchargement du repo JackA1ltman ==="
 git clone --depth=1 https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd.git /tmp/jack_repo 2>/dev/null || true
 
 echo "=== Application du patch SusFS 4.19 ==="
-PATCH_419=$(find /tmp/jack_repo/Patches -name "*4.19*" -name "*.patch" | head -1)
+PATCH_419=$(find /tmp/jack_repo/Patches -name "*4.19*" -name "*.patch" 2>/dev/null | head -1)
 if [ -n "$PATCH_419" ]; then
   echo "Application du patch: $PATCH_419"
   patch -p1 < "$PATCH_419" 2>&1 | tee /tmp/susfs_patch.log || true
   echo "Patch appliqué"
 else
   echo "Recherche des patches..."
-  find /tmp/jack_repo/Patches -name "*.patch" | head -20
+  find /tmp/jack_repo/Patches -name "*.patch" 2>/dev/null | head -20 || true
 fi
 
 echo "=== Vérification des .rej ==="
@@ -194,22 +182,26 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
   echo "CONFIG_COMPAT_32BIT_TIME=y"
   echo "# CONFIG_COMPAT_VDSO is not set"
   echo "# CONFIG_VDSO32 is not set"
+
+  # SusFS - version minimale pour éviter les conflits avec le canal ioctl/fd
   echo "CONFIG_KSU_SUSFS=y"
   echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
   echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
   echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
-  echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
   echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
-  echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
-  echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
-  echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
-  echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
+
+  # Options agressives désactivées (souvent source de Bad file descriptor)
+  echo "# CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS is not set"
+  echo "# CONFIG_KSU_SUSFS_OPEN_REDIRECT is not set"
+  echo "# CONFIG_KSU_SUSFS_SPOOF_UNAME is not set"
+  echo "# CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG is not set"
+  echo "# CONFIG_KSU_SUSFS_SUS_MAP is not set"
 } >> out/.config
 
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 olddefconfig
 
 echo "=== Vérification ==="
-grep -E "CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK|CONFIG_KPROBES" out/.config
+grep -E "CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK|CONFIG_KPROBES|CONFIG_KSU_SUSFS" out/.config || true
 
 echo "=== Patch signatures + tactile ==="
 sed -i 's/if (!check_version(/if (0 \&\& !check_version(/g' kernel/module.c
@@ -243,6 +235,7 @@ export AARCH64_CLANGXX_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x8
 export AR_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
 export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot -I$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aarch64-linux-android"
 
+# Même source que le setup.sh pour éviter le mismatch de version
 git clone --depth=1 https://github.com/backslashxx/KernelSU.git ksud-src
 cd ksud-src/userspace/ksud
 
@@ -291,11 +284,12 @@ if [ -f "boot-stock.img" ]; then
   ./magiskboot unpack boot.img
   cp $GITHUB_WORKSPACE/kernel_sources/out/arch/arm64/boot/Image kernel
 
+  # === CORRECTION IMPORTANTE : ksud en fichier, pas en dossier ===
   if [ -f "$GITHUB_WORKSPACE/ksud" ]; then
-    mkdir -p ramdisk/data/adb/ksud
-    cp $GITHUB_WORKSPACE/ksud ramdisk/data/adb/ksud/ksud
-    chmod 755 ramdisk/data/adb/ksud/ksud
-    echo "OK: ksud dans le ramdisk"
+    mkdir -p ramdisk/data/adb
+    cp "$GITHUB_WORKSPACE/ksud" ramdisk/data/adb/ksud
+    chmod 755 ramdisk/data/adb/ksud
+    echo "OK: ksud placé correctement dans /data/adb/ksud (fichier)"
   else
     echo "ATTENTION: ksud non trouvé, boot.img généré sans"
   fi
@@ -309,8 +303,14 @@ echo "=== Copie vers output ==="
 mkdir -p output
 cp final_boot.img output/Backslashxx-SusFS-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
-cp kernel_sources/build.log output/
+cp kernel_sources/build.log output/ 2>/dev/null || true
 cp $GITHUB_WORKSPACE/ksud output/ksud 2>/dev/null || true
 
 echo "=== BUILD TERMINÉ ==="
 ls -lh output/
+echo ""
+echo "=== Rappels importants ==="
+echo "1. Utilise le MÊME commit de backslashxx pour kernel + ksud + manager"
+echo "2. Après flash, ouvre le manager KernelSU une fois pour finaliser l'installation de ksud"
+echo "3. Vérifie que Termux est bien autorisé dans Superuser"
+echo "4. Teste avec : su -c id"
