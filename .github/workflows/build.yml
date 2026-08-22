@@ -1,17 +1,29 @@
 name: Build Backslashxx KernelSU
+
 on:
   workflow_dispatch:
+
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 360
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Run build script
-        run: bash build.sh
-      - name: Upload results
+
+      - name: Run build
+        run: |
+          chmod +x build.sh
+          bash build.sh
+
+      - name: Upload results and diagnostics
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Backslashxx-SusFS-kiev
-          path: output/*
+          name: Backslashxx-SuSFS-kiev
+          path: output/
+          if-no-files-found: warn
