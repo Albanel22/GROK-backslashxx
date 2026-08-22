@@ -1,37 +1,10 @@
-```bash
 #!/bin/bash
 set -euo pipefail
-
-###############################################################################
-# Backslashxx KernelSU + SuSFS + Motorola kiev
-#
-# Device  : Motorola One 5G Ace / kiev
-# Kernel  : Linux 4.19
-# Kernel  : LineageOS lineage-23.2
-#
-# KernelSU:
-#   https://github.com/backslashxx/KernelSU
-#
-# SuSFS:
-#   https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd
-#
-# IMPORTANT
-# -----------------------------------------------------------------------------
-# 1. KernelSU est intégré avec le setup.sh de Backslashxx.
-# 2. SuSFS utilise exclusivement la méthode JackA1ltman mainline.
-# 3. Aucun ancien susfs_patch_to_4.19.patch n'est utilisé.
-# 4. Aucun hook exec/open/stat manuel n'est ajouté ici.
-# 5. Le patch tactile Motorola est conservé.
-# 6. ksud est compilé depuis LE MÊME checkout Backslashxx que KernelSU.
-# 7. Les assets ksud/bin/aarch64 restent présents afin que rust-embed
-#    les embarque dans ksud.
-###############################################################################
 
 export DEBIAN_FRONTEND=noninteractive
 export ARCH=arm64
 export SUBARCH=arm64
 export LLVM=1
-
 export CROSS_COMPILE=aarch64-linux-gnu-
 export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
@@ -39,9 +12,7 @@ WORKSPACE="${GITHUB_WORKSPACE:-$(pwd)}"
 
 KERNEL_DIR="$WORKSPACE/kernel_sources"
 OUT_DIR="$KERNEL_DIR/out"
-
 OUTPUT_DIR="$WORKSPACE/output"
-
 KSU_DIR="$WORKSPACE/KernelSU"
 JACK_DIR="$WORKSPACE/NonGKI_Kernel_Build_2nd"
 
@@ -59,257 +30,108 @@ DEFCONFIG="vendor/lito-perf_defconfig"
 BOOT_URL="https://mirrorbits.lineageos.org/full/kiev/20260809/boot.img"
 DTBO_URL="https://mirrorbits.lineageos.org/full/kiev/20260809/dtbo.img"
 
-###############################################################################
-# START
-###############################################################################
+echo "Début du build Backslashxx KernelSU + SuSFS + tactile"
 
-echo
-echo "============================================================"
-echo " Backslashxx KernelSU + SuSFS + Tactile"
-echo " Motorola kiev / Linux 4.19"
-echo "============================================================"
-
-echo
-echo "Workspace : $WORKSPACE"
-echo "Kernel    : $KERNEL_REPO"
-echo "Branch    : $KERNEL_BRANCH"
-echo "KernelSU  : $KSU_REPO"
-echo "Jack      : $JACK_REPO"
-echo "Defconfig : $DEFCONFIG"
-
-###############################################################################
-# CLEAN
-###############################################################################
-
-echo
-echo "=== Nettoyage ==="
-
-rm -rf "$KERNEL_DIR"
-rm -rf "$KSU_DIR"
-rm -rf "$JACK_DIR"
-rm -rf "$OUTPUT_DIR"
-
-rm -rf \
-    "$WORKSPACE/repack" \
-    "$WORKSPACE/verify_boot" \
-    "$WORKSPACE/ksud-src" \
-    "$WORKSPACE/android-ndk-r26d"
-
-rm -f \
-    "$WORKSPACE/ksud" \
-    "$WORKSPACE/final_boot.img" \
-    "$WORKSPACE/boot-stock.img" \
-    "$WORKSPACE/dtbo-stock.img" \
-    "$WORKSPACE/android-ndk-r26d-linux.zip"
+rm -rf "$KERNEL_DIR" "$KSU_DIR" "$JACK_DIR" "$OUTPUT_DIR"
+rm -rf "$WORKSPACE/repack" "$WORKSPACE/verify_boot"
+rm -rf "$WORKSPACE/android-ndk-r26d"
+rm -f "$WORKSPACE/ksud" "$WORKSPACE/final_boot.img"
+rm -f "$WORKSPACE/boot-stock.img" "$WORKSPACE/dtbo-stock.img"
+rm -f "$WORKSPACE/android-ndk-r26d-linux.zip"
 
 mkdir -p "$OUTPUT_DIR"
 
-###############################################################################
-# DEPENDENCIES
-###############################################################################
-
-echo
-echo "=== Installation des dépendances ==="
+echo "Installation des dépendances"
 
 sudo apt-get update
-
 sudo apt-get install -y \
-    bc \
-    bison \
-    build-essential \
-    ccache \
-    clang \
-    curl \
-    device-tree-compiler \
-    flex \
-    gcc-aarch64-linux-gnu \
-    gcc-arm-linux-gnueabi \
-    git \
-    libelf-dev \
-    libncurses-dev \
-    libssl-dev \
-    lld \
-    llvm \
-    mkbootimg \
-    perl \
-    python3 \
-    unzip \
-    wget \
-    zip
+    bc bison build-essential ccache clang curl \
+    device-tree-compiler flex gcc-aarch64-linux-gnu \
+    gcc-arm-linux-gnueabi git libelf-dev libncurses-dev \
+    libssl-dev lld llvm mkbootimg perl python3 unzip wget zip
 
-echo
-echo "=== Toolchain ==="
+echo "Clonage du kernel"
 
-clang --version | head -1
-ld.lld --version | head -1
-aarch64-linux-gnu-gcc --version | head -1
-
-###############################################################################
-# CLONE KERNEL
-###############################################################################
-
-echo
-echo "============================================================"
-echo "=== Clonage kernel LineageOS ==="
-echo "============================================================"
-
-git clone \
-    --depth=1 \
+git clone --depth=1 \
     --branch "$KERNEL_BRANCH" \
     "$KERNEL_REPO" \
     "$KERNEL_DIR"
 
 cd "$KERNEL_DIR"
 
-###############################################################################
-# VERIFY KERNEL VERSION
-###############################################################################
-
-echo
-echo "=== Vérification kernel ==="
-
 KERNEL_VERSION="$(
     awk '
-        /^VERSION[[:space:]]*=/ {
-            v=$3
-        }
-        /^PATCHLEVEL[[:space:]]*=/ {
-            p=$3
-        }
-        END {
-            print v "." p
-        }
+        /^VERSION[[:space:]]*=/ { v=$3 }
+        /^PATCHLEVEL[[:space:]]*=/ { p=$3 }
+        END { print v "." p }
     ' Makefile
 )"
 
-echo "Version détectée : $KERNEL_VERSION"
-
 if [ "$KERNEL_VERSION" != "4.19" ]; then
-    echo "ERREUR : kernel 4.19 attendu."
+    echo "ERREUR: kernel $KERNEL_VERSION détecté, 4.19 attendu"
     exit 1
 fi
-
-###############################################################################
-# VERIFY DEFCONFIG
-###############################################################################
-
-echo
-echo "=== Vérification defconfig ==="
 
 if [ ! -f "arch/arm64/configs/vendor/lito-perf_defconfig" ]; then
-    echo "ERREUR : vendor/lito-perf_defconfig absent."
-
-    find arch/arm64/configs \
-        -maxdepth 2 \
-        \( \
-            -iname "*lito*" \
-            -o -iname "*kiev*" \
-            -o -iname "*sm8250*" \
-        \) \
-        -print
-
+    echo "ERREUR: vendor/lito-perf_defconfig absent"
     exit 1
 fi
 
-###############################################################################
-# CLONE BACKSLASHXX KERNELSU
-###############################################################################
+echo "Clonage Backslashxx KernelSU"
 
-echo
-echo "============================================================"
-echo "=== Clonage Backslashxx KernelSU ==="
-echo "============================================================"
-
-git clone \
-    --depth=1 \
+git clone --depth=1 \
     --branch "$KSU_BRANCH" \
     "$KSU_REPO" \
     "$KSU_DIR"
 
-cd "$KSU_DIR"
+KSU_COMMIT="$(git -C "$KSU_DIR" rev-parse HEAD)"
+echo "KernelSU: $KSU_COMMIT"
 
-KSU_COMMIT="$(git rev-parse HEAD)"
-
-echo "KernelSU commit : $KSU_COMMIT"
-
-cd "$KERNEL_DIR"
-
-###############################################################################
-# KERNELSU SETUP
-###############################################################################
-
-echo
-echo "============================================================"
-echo "=== Intégration KernelSU ==="
-echo "============================================================"
-
-rm -rf KernelSU
-rm -rf drivers/kernelsu
-
-# Utilise le setup.sh provenant du checkout Backslashxx que nous venons
-# précisément de cloner. Cela évite d'avoir deux versions différentes
-# du code KernelSU entre le kernel et ksud.
+echo "Intégration KernelSU"
 
 if [ ! -f "$KSU_DIR/kernel/setup.sh" ]; then
-    echo "ERREUR : KernelSU/kernel/setup.sh absent."
+    echo "ERREUR: setup.sh Backslashxx absent"
     exit 1
 fi
+
+rm -rf KernelSU drivers/kernelsu
 
 bash "$KSU_DIR/kernel/setup.sh"
 
-if [ ! -d "KernelSU/kernel" ]; then
-    echo "ERREUR : KernelSU/kernel absent après setup."
+if [ ! -d "KernelSU/kernel" ] || [ ! -e "drivers/kernelsu" ]; then
+    echo "ERREUR: intégration KernelSU incomplète"
     exit 1
 fi
 
-if [ ! -e "drivers/kernelsu" ]; then
-    echo "ERREUR : drivers/kernelsu absent après setup."
-    exit 1
-fi
+echo "Clonage JackA1ltman"
 
-echo "KernelSU correctement intégré."
-
-###############################################################################
-# JACKA1LTMAN
-###############################################################################
-
-echo
-echo "============================================================"
-echo "=== Clonage JackA1ltman NonGKI_Kernel_Build_2nd ==="
-echo "============================================================"
-
-git clone \
-    --depth=1 \
+git clone --depth=1 \
     --branch "$JACK_BRANCH" \
     "$JACK_REPO" \
     "$JACK_DIR"
 
-JACK_HOOK="$JACK_DIR/Patches/susfs_inline_hook_patches.sh"
+echo "Recherche du script SuSFS"
 
-if [ ! -f "$JACK_HOOK" ]; then
-    echo "ERREUR : $JACK_HOOK absent."
+JACK_SCRIPT="$(
+    find "$JACK_DIR" -type f \
+    \( \
+        -name "susfs_inline_hook_patches.sh" \
+        -o -name "susfs*.sh" \
+    \) \
+    -print | head -1
+)"
 
-    find "$JACK_DIR/Patches" \
-        -maxdepth 1 \
-        -type f \
-        -print
-
+if [ -z "$JACK_SCRIPT" ]; then
+    echo "ERREUR: script SuSFS JackA1ltman introuvable"
+    find "$JACK_DIR" -maxdepth 3 -type f | sort | head -100
     exit 1
 fi
 
-chmod +x "$JACK_HOOK"
+chmod +x "$JACK_SCRIPT"
 
-echo "Script SuSFS trouvé :"
-echo "$JACK_HOOK"
+echo "Script SuSFS: $JACK_SCRIPT"
 
-###############################################################################
-# INITIAL DEFCONFIG
-###############################################################################
-
-echo
-echo "============================================================"
-echo "=== Defconfig initial ==="
-echo "============================================================"
+echo "Configuration initiale"
 
 make \
     O="$OUT_DIR" \
@@ -318,41 +140,35 @@ make \
     CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
     "$DEFCONFIG"
 
-###############################################################################
-# KSU / SUSFS CONFIG
-###############################################################################
+echo "Activation KernelSU et SuSFS"
 
-echo
-echo "============================================================"
-echo "=== Configuration KernelSU / SuSFS ==="
-echo "============================================================"
+if [ ! -x "scripts/config" ]; then
+    echo "ERREUR: scripts/config absent"
+    exit 1
+fi
 
-cat >> "$OUT_DIR/.config" <<'EOF'
+scripts/config --file "$OUT_DIR/.config" \
+    --enable KSU \
+    --enable KSU_MANUAL_HOOK \
+    --enable KALLSYMS \
+    --enable KALLSYMS_ALL \
+    --enable COMPAT \
+    --enable COMPAT_32BIT_TIME \
+    --enable KSU_SUSFS \
+    --enable KSU_SUSFS_SUS_PATH \
+    --enable KSU_SUSFS_SUS_MOUNT \
+    --enable KSU_SUSFS_SUS_KSTAT \
+    --enable KSU_SUSFS_SPOOF_UNAME \
+    --enable KSU_SUSFS_ENABLE_LOG \
+    --enable KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+    --enable KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+    --enable KSU_SUSFS_OPEN_REDIRECT \
+    --enable KSU_SUSFS_SUS_MAP
 
-# KernelSU
-CONFIG_KSU=y
-CONFIG_KSU_MANUAL_HOOK=y
-
-# Kernel symbols
-CONFIG_KALLSYMS=y
-CONFIG_KALLSYMS_ALL=y
-
-# Compatibility
-CONFIG_COMPAT=y
-CONFIG_COMPAT_32BIT_TIME=y
-
-# SuSFS
-CONFIG_KSU_SUSFS=y
-CONFIG_KSU_SUSFS_SUS_PATH=y
-CONFIG_KSU_SUSFS_SUS_MOUNT=y
-CONFIG_KSU_SUSFS_SUS_KSTAT=y
-CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-CONFIG_KSU_SUSFS_ENABLE_LOG=y
-CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
-CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
-CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-CONFIG_KSU_SUSFS_SUS_MAP=y
-EOF
+scripts/config --file "$OUT_DIR/.config" \
+    --disable KPROBES \
+    --disable HAVE_KPROBES \
+    --disable KPROBE_EVENTS
 
 make \
     O="$OUT_DIR" \
@@ -361,14 +177,7 @@ make \
     CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
     olddefconfig
 
-###############################################################################
-# VERIFY CONFIG
-###############################################################################
-
-echo
-echo "============================================================"
-echo "=== Vérification configuration ==="
-echo "============================================================"
+echo "Vérification configuration"
 
 REQUIRED_CONFIGS=(
     CONFIG_KSU
@@ -388,98 +197,53 @@ REQUIRED_CONFIGS=(
 )
 
 for CONFIG_NAME in "${REQUIRED_CONFIGS[@]}"; do
-    if ! grep -q "^${CONFIG_NAME}=y$" "$OUT_DIR/.config"; then
-        echo "ERREUR : ${CONFIG_NAME} n'est pas activé."
+    grep -q "^${CONFIG_NAME}=y$" "$OUT_DIR/.config" || {
+        echo "ERREUR: $CONFIG_NAME absent"
         exit 1
-    fi
-
-    echo "OK : ${CONFIG_NAME}=y"
+    }
 done
 
-###############################################################################
-# APPLY JACKA1LTMAN SUSFS HOOKS
-###############################################################################
+echo "Configuration OK"
 
-echo
-echo "============================================================"
-echo "=== Application des hooks SuSFS JackA1ltman ==="
-echo "============================================================"
+echo "Application des hooks SuSFS JackA1ltman"
 
-cp \
-    "$JACK_HOOK" \
-    "$KERNEL_DIR/susfs_inline_hook_patches.sh"
-
+cp "$JACK_SCRIPT" "$KERNEL_DIR/susfs_inline_hook_patches.sh"
 chmod +x "$KERNEL_DIR/susfs_inline_hook_patches.sh"
 
 ./susfs_inline_hook_patches.sh \
     2>&1 | tee "$OUTPUT_DIR/susfs_hooks.log"
 
-###############################################################################
-# NO REJECTS
-###############################################################################
-
-echo
-echo "=== Vérification des .rej ==="
-
-REJECTS="$(find "$KERNEL_DIR" -type f -name '*.rej' -print || true)"
-
-if [ -n "$REJECTS" ]; then
-    echo
-    echo "ERREUR : fichiers .rej détectés :"
-    echo "$REJECTS"
+if find "$KERNEL_DIR" -type f -name "*.rej" -print | grep -q .; then
+    echo "ERREUR: fichiers .rej détectés"
+    find "$KERNEL_DIR" -type f -name "*.rej" -print
     exit 1
 fi
 
-echo "Aucun .rej."
+echo "Vérification hooks KernelSU"
 
-###############################################################################
-# VERIFY HOOKS
-###############################################################################
+for CHECK in \
+    "fs/exec.c:ksu_handle_execveat" \
+    "fs/open.c:ksu_handle_faccessat" \
+    "fs/stat.c:ksu_handle_stat" \
+    "kernel/sys.c:ksu_handle_setresuid"
+do
+    FILE="${CHECK%%:*}"
+    SYMBOL="${CHECK#*:}"
 
-echo
-echo "============================================================"
-echo "=== Vérification hooks ==="
-echo "============================================================"
+    grep -q "$SYMBOL" "$FILE" || {
+        echo "ERREUR: $SYMBOL absent de $FILE"
+        exit 1
+    }
+done
 
-HOOK_ERROR=0
+echo "Hooks KernelSU présents"
 
-check_pattern()
-{
-    local FILE="$1"
-    local PATTERN="$2"
-
-    if grep -q "$PATTERN" "$FILE"; then
-        echo "OK : $FILE -> $PATTERN"
-    else
-        echo "ERREUR : $FILE -> $PATTERN absent"
-        HOOK_ERROR=1
-    fi
-}
-
-check_pattern fs/exec.c "ksu_handle_execveat"
-check_pattern fs/open.c "ksu_handle_faccessat"
-check_pattern fs/stat.c "ksu_handle_stat"
-check_pattern kernel/sys.c "ksu_handle_setresuid"
-
-if [ "$HOOK_ERROR" -ne 0 ]; then
-    echo
-    echo "ERREUR : les hooks KernelSU/SuSFS attendus ne sont pas tous présents."
-    exit 1
-fi
-
-###############################################################################
-# PATCH TACTILE MOTOROLA
-###############################################################################
-
-echo
-echo "============================================================"
-echo "=== Patch tactile Motorola ==="
-echo "============================================================"
+echo "Application du patch tactile Motorola"
 
 TOUCH_FILE="techpack/display/msm/msm_drv.c"
 
 if [ ! -f "$TOUCH_FILE" ]; then
-    echo "ERREUR : $TOUCH_FILE introuvable."
+    echo "ERREUR: $TOUCH_FILE absent"
     exit 1
 fi
 
@@ -489,14 +253,10 @@ from pathlib import Path
 path = Path("techpack/display/msm/msm_drv.c")
 text = path.read_text()
 
-marker = "motorola_panel_notifier_list"
+if "motorola_panel_notifier_list" not in text:
+    text += r'''
 
-if marker in text:
-    print("Patch tactile déjà présent.")
-else:
-    patch = r'''
-
-/* --- Début Patch Tactile Motorola --- */
+/* Motorola tactile compatibility */
 #include <linux/notifier.h>
 #include <linux/module.h>
 
@@ -521,37 +281,19 @@ void touch_set_state(int state)
     return;
 }
 EXPORT_SYMBOL(touch_set_state);
-
-/* --- Fin Patch Tactile Motorola --- */
 '''
 
-    path.write_text(text + patch)
-
-    print("Patch tactile Motorola ajouté.")
+    path.write_text(text)
 PY
-
-###############################################################################
-# VERIFY TOUCH
-###############################################################################
-
-echo
-echo "=== Vérification patch tactile ==="
 
 grep -q "motorola_panel_notifier_list" "$TOUCH_FILE"
 grep -q "panel_register_notifier" "$TOUCH_FILE"
 grep -q "panel_unregister_notifier" "$TOUCH_FILE"
 grep -q "touch_set_state" "$TOUCH_FILE"
 
-echo "Patch tactile présent."
+echo "Patch tactile présent"
 
-###############################################################################
-# BUILD KERNEL
-###############################################################################
-
-echo
-echo "============================================================"
-echo "=== Compilation kernel ==="
-echo "============================================================"
+echo "Compilation du kernel"
 
 make \
     O="$OUT_DIR" \
@@ -565,31 +307,21 @@ make \
 KERNEL_IMAGE="$OUT_DIR/arch/arm64/boot/Image"
 
 if [ ! -s "$KERNEL_IMAGE" ]; then
-    echo "ERREUR : Image kernel absente."
+    echo "ERREUR: Image kernel absente"
     exit 1
 fi
 
-echo
-echo "Kernel compilé :"
-ls -lh "$KERNEL_IMAGE"
-
-###############################################################################
-# ANDROID NDK
-###############################################################################
-
-echo
-echo "============================================================"
-echo "=== Android NDK ==="
-echo "============================================================"
+echo "Kernel compilé"
 
 cd "$WORKSPACE"
+
+echo "Installation Android NDK"
 
 wget -q \
     https://dl.google.com/android/repository/android-ndk-r26d-linux.zip \
     -O android-ndk-r26d-linux.zip
 
-unzip -q \
-    android-ndk-r26d-linux.zip
+unzip -q android-ndk-r26d-linux.zip
 
 export ANDROID_NDK_ROOT="$WORKSPACE/android-ndk-r26d"
 export ANDROID_NDK_HOME="$ANDROID_NDK_ROOT"
@@ -602,67 +334,27 @@ export AR_PATH="$NDK_HOST/bin/llvm-ar"
 
 export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$NDK_HOST/sysroot -I$NDK_HOST/sysroot/usr/include/aarch64-linux-android"
 
-if [ ! -x "$AARCH64_CLANG_PATH" ]; then
-    echo "ERREUR : clang Android NDK absent."
-    exit 1
-fi
-
-###############################################################################
-# RUST
-###############################################################################
-
-echo
-echo "============================================================"
-echo "=== Rust ==="
-echo "============================================================"
-
 if ! command -v rustup >/dev/null 2>&1; then
-    curl \
-        --proto '=https' \
-        --tlsv1.2 \
-        -sSf \
-        https://sh.rustup.rs \
-        | sh -s -- -y
+    curl --proto '=https' --tlsv1.2 -sSf \
+        https://sh.rustup.rs | sh -s -- -y
 fi
 
 source "$HOME/.cargo/env"
 
 rustup target add aarch64-linux-android
 
-###############################################################################
-# BUILD KSUD FROM SAME BACKSLASHXX CHECKOUT
-###############################################################################
-
-echo
-echo "============================================================"
-echo "=== Compilation ksud Backslashxx ==="
-echo "============================================================"
+echo "Préparation ksud Backslashxx"
 
 cd "$KSU_DIR/userspace/ksud"
 
-echo
-echo "=== Vérification assets ksud ==="
-
 if [ ! -d "bin/aarch64" ]; then
-    echo "ERREUR : userspace/ksud/bin/aarch64 absent."
+    echo "ERREUR: userspace/ksud/bin/aarch64 absent"
     exit 1
 fi
 
-echo "Assets présents :"
-find bin/aarch64 -maxdepth 1 -type f -printf '%f\n' | sort
-
-###############################################################################
-# CLEAN KSUD BUILD
-#
-# Cargo.toml explicitly uses rust-embed with compression.
-# A clean build is therefore required when embedded binaries change.
-###############################################################################
+find bin/aarch64 -maxdepth 1 -type f -print | sort
 
 cargo clean
-
-###############################################################################
-# CARGO CONFIG
-###############################################################################
 
 mkdir -p .cargo
 
@@ -677,92 +369,53 @@ AR_aarch64_linux_android = "$AR_PATH"
 BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android = "$BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android"
 EOF
 
-###############################################################################
-# BUILD
-###############################################################################
+echo "Compilation ksud"
 
 cargo build \
     --release \
     --target aarch64-linux-android \
+    --manifest-path "$KSU_DIR/userspace/ksud/Cargo.toml" \
     2>&1 | tee "$OUTPUT_DIR/ksud-build.log"
 
 KSUD_BINARY="$KSU_DIR/userspace/ksud/target/aarch64-linux-android/release/ksud"
 
 if [ ! -x "$KSUD_BINARY" ]; then
-    echo "ERREUR : ksud absent après compilation."
-
-    find "$KSU_DIR/userspace/ksud/target" \
-        -type f \
-        -name "ksud" \
-        -print || true
-
+    echo "ERREUR: ksud absent"
     exit 1
 fi
 
-cp \
-    "$KSUD_BINARY" \
-    "$WORKSPACE/ksud"
+cp "$KSUD_BINARY" "$WORKSPACE/ksud"
+chmod 755 "$WORKSPACE/ksud"
 
-chmod 755 \
-    "$WORKSPACE/ksud"
-
-echo
-echo "ksud compilé :"
-ls -lh "$WORKSPACE/ksud"
-
-###############################################################################
-# VERIFY KSUD ARCH
-###############################################################################
-
-echo
-echo "=== Vérification architecture ksud ==="
-
-file "$WORKSPACE/ksud"
-
-if ! file "$WORKSPACE/ksud" | grep -qi "aarch64"; then
-    echo "ERREUR : ksud n'est pas AArch64."
+file "$WORKSPACE/ksud" | grep -qi aarch64 || {
+    echo "ERREUR: ksud n'est pas AArch64"
     exit 1
-fi
+}
 
-###############################################################################
-# DOWNLOAD STOCK BOOT
-###############################################################################
-
-echo
-echo "============================================================"
-echo "=== Boot stock ==="
-echo "============================================================"
+echo "Téléchargement boot stock"
 
 cd "$WORKSPACE"
 
-curl -fL \
-    "$BOOT_URL" \
-    -o boot-stock.img
-
-curl -fL \
-    "$DTBO_URL" \
-    -o dtbo-stock.img
+curl -fL "$BOOT_URL" -o boot-stock.img
+curl -fL "$DTBO_URL" -o dtbo-stock.img
 
 if [ ! -s boot-stock.img ]; then
-    echo "ERREUR : boot-stock.img absent."
+    echo "ERREUR: boot-stock.img absent"
     exit 1
 fi
 
-###############################################################################
-# MAGISKBOOT
-###############################################################################
-
-echo
-echo "=== Préparation magiskboot ==="
+echo "Installation magiskboot"
 
 mkdir -p "$WORKSPACE/repack"
 
 wget -q \
     https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk \
-    -O "$WORKSPACE/Magisk-v27.0.apk"
+    -O Magisk-v27.0.apk
+
+mkdir -p "$WORKSPACE/magisk_extract"
 
 unzip -q \
-    "$WORKSPACE/Magisk-v27.0.apk" \
+    Magisk-v27.0.apk \
     'lib/x86_64/libmagiskboot.so' \
     -d "$WORKSPACE/magisk_extract"
 
@@ -770,227 +423,91 @@ cp \
     "$WORKSPACE/magisk_extract/lib/x86_64/libmagiskboot.so" \
     "$WORKSPACE/repack/magiskboot"
 
-chmod 755 \
-    "$WORKSPACE/repack/magiskboot"
+chmod 755 "$WORKSPACE/repack/magiskboot"
 
-###############################################################################
-# UNPACK
-###############################################################################
+echo "Décompression boot"
 
-echo
-echo "============================================================"
-echo "=== Unpack boot.img ==="
-echo "============================================================"
-
-cp \
-    "$WORKSPACE/boot-stock.img" \
-    "$WORKSPACE/repack/boot.img"
+cp "$WORKSPACE/boot-stock.img" "$WORKSPACE/repack/boot.img"
 
 cd "$WORKSPACE/repack"
 
 ./magiskboot unpack boot.img
 
-if [ ! -f kernel ]; then
-    echo "ERREUR : kernel absent après unpack."
+if [ ! -f kernel ] || [ ! -d ramdisk ]; then
+    echo "ERREUR: unpack boot incomplet"
     exit 1
 fi
 
-if [ ! -d ramdisk ]; then
-    echo "ERREUR : ramdisk absent après unpack."
-    exit 1
-fi
+echo "Remplacement kernel"
 
-###############################################################################
-# INSTALL KERNEL
-###############################################################################
+cp "$KERNEL_IMAGE" kernel
 
-echo
-echo "=== Installation du kernel compilé ==="
+echo "Installation ksud"
 
-cp \
-    "$KERNEL_IMAGE" \
-    kernel
+mkdir -p ramdisk/data/adb
 
-###############################################################################
-# INSTALL KSUD
-###############################################################################
-
-echo
-echo "============================================================"
-echo "=== Installation ksud ==="
-echo "============================================================"
-
-mkdir -p \
-    ramdisk/data/adb
-
-cp \
-    "$WORKSPACE/ksud" \
-    ramdisk/data/adb/ksud
-
-chmod 755 \
-    ramdisk/data/adb/ksud
+cp "$WORKSPACE/ksud" ramdisk/data/adb/ksud
+chmod 755 ramdisk/data/adb/ksud
 
 if [ ! -x ramdisk/data/adb/ksud ]; then
-    echo "ERREUR : ksud non exécutable."
+    echo "ERREUR: /data/adb/ksud non exécutable"
     exit 1
 fi
 
-echo "OK : /data/adb/ksud"
+echo "Repack boot"
 
-###############################################################################
-# NOTE
-#
-# ksud itself contains the Android aarch64 assets through rust-embed.
-# assets.rs extracts them into /data/adb/ksu/bin/ when ksud performs its
-# initialization. We therefore do NOT manually copy resetprop/busybox/etc.
-# into the boot ramdisk here.
-###############################################################################
-
-###############################################################################
-# REPACK
-###############################################################################
-
-echo
-echo "============================================================"
-echo "=== Repack boot.img ==="
-echo "============================================================"
-
-./magiskboot repack \
-    boot.img \
-    new-boot.img
+./magiskboot repack boot.img new-boot.img
 
 if [ ! -s new-boot.img ]; then
-    echo "ERREUR : nouveau boot.img absent."
+    echo "ERREUR: nouveau boot absent"
     exit 1
 fi
 
-mv \
-    new-boot.img \
-    "$WORKSPACE/final_boot.img"
+mv new-boot.img "$WORKSPACE/final_boot.img"
 
-###############################################################################
-# VERIFY FINAL BOOT
-###############################################################################
-
-echo
-echo "============================================================"
-echo "=== Vérification boot final ==="
-echo "============================================================"
+echo "Vérification boot final"
 
 rm -rf "$WORKSPACE/verify_boot"
-
 mkdir -p "$WORKSPACE/verify_boot"
 
-cp \
-    "$WORKSPACE/final_boot.img" \
-    "$WORKSPACE/verify_boot/boot.img"
+cp "$WORKSPACE/final_boot.img" \
+   "$WORKSPACE/verify_boot/boot.img"
 
 cd "$WORKSPACE/verify_boot"
 
 "$WORKSPACE/repack/magiskboot" unpack boot.img >/dev/null
 
-if [ ! -f kernel ]; then
-    echo "ERREUR : kernel absent du boot final."
+[ -f kernel ] || {
+    echo "ERREUR: kernel absent du boot final"
     exit 1
-fi
+}
 
-if [ ! -d ramdisk ]; then
-    echo "ERREUR : ramdisk absent du boot final."
+[ -d ramdisk ] || {
+    echo "ERREUR: ramdisk absent du boot final"
     exit 1
-fi
+}
 
-if [ ! -x ramdisk/data/adb/ksud ]; then
-    echo "ERREUR : ksud absent/non exécutable dans le boot final."
+[ -x ramdisk/data/adb/ksud ] || {
+    echo "ERREUR: ksud absent du boot final"
     exit 1
-fi
+}
 
-echo "OK : kernel présent."
-echo "OK : ramdisk présent."
-echo "OK : /data/adb/ksud présent."
-
-###############################################################################
-# OUTPUT
-###############################################################################
-
-echo
-echo "============================================================"
-echo "=== Artifacts ==="
-echo "============================================================"
+echo "Copie des résultats"
 
 cd "$WORKSPACE"
 
-cp \
-    "$WORKSPACE/final_boot.img" \
-    "$OUTPUT_DIR/Backslashxx-SuSFS-kiev-boot.img"
+cp "$WORKSPACE/final_boot.img" \
+   "$OUTPUT_DIR/Backslashxx-SuSFS-kiev-boot.img"
 
-cp \
-    "$WORKSPACE/dtbo-stock.img" \
-    "$OUTPUT_DIR/dtbo.img"
+cp "$WORKSPACE/dtbo-stock.img" \
+   "$OUTPUT_DIR/dtbo.img"
 
-cp \
-    "$WORKSPACE/ksud" \
-    "$OUTPUT_DIR/ksud"
+cp "$WORKSPACE/ksud" \
+   "$OUTPUT_DIR/ksud"
 
-cp \
-    "$OUTPUT_DIR/build.log" \
-    "$OUTPUT_DIR/build.log"
+cp "$OUT_DIR/.config" \
+   "$OUTPUT_DIR/kernel.config"
 
-cp \
-    "$OUTPUT_DIR/susfs_hooks.log" \
-    "$OUTPUT_DIR/susfs_hooks.log"
+echo "BUILD TERMINÉ"
 
-cp \
-    "$OUTPUT_DIR/ksud-build.log" \
-    "$OUTPUT_DIR/ksud-build.log"
-
-###############################################################################
-# CONFIG ARTIFACT
-###############################################################################
-
-cp \
-    "$OUT_DIR/.config" \
-    "$OUTPUT_DIR/kernel.config"
-
-###############################################################################
-# FINAL
-###############################################################################
-
-echo
-echo "============================================================"
-echo " BUILD TERMINÉ"
-echo "============================================================"
-
-echo
-echo "Artifacts :"
 ls -lh "$OUTPUT_DIR"
-
-echo
-echo "Boot final :"
-ls -lh "$OUTPUT_DIR/Backslashxx-SuSFS-kiev-boot.img"
-
-echo
-echo "ksud :"
-ls -lh "$OUTPUT_DIR/ksud"
-
-echo
-echo "============================================================"
-echo " Vérifications effectuées"
-echo "============================================================"
-echo " [OK] Linux 4.19"
-echo " [OK] vendor/lito-perf_defconfig"
-echo " [OK] Backslashxx KernelSU"
-echo " [OK] CONFIG_KSU=y"
-echo " [OK] CONFIG_KSU_MANUAL_HOOK=y"
-echo " [OK] CONFIG_KALLSYMS"
-echo " [OK] CONFIG_KALLSYMS_ALL"
-echo " [OK] SuSFS"
-echo " [OK] JackA1ltman inline hooks"
-echo " [OK] Aucun .rej"
-echo " [OK] Patch tactile Motorola"
-echo " [OK] Kernel Image"
-echo " [OK] ksud AArch64"
-echo " [OK] ksud compilé avec assets rust-embed"
-echo " [OK] /data/adb/ksud"
-echo " [OK] boot.img repacké"
-echo "============================================================"
-```
