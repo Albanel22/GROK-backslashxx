@@ -24,24 +24,48 @@ DEFCONFIG="vendor/lito-perf_defconfig"
 BOOT_URL="https://mirrorbits.lineageos.org/full/kiev/20260809/boot.img"
 DTBO_URL="https://mirrorbits.lineageos.org/full/kiev/20260809/dtbo.img"
 
-rm -rf "$KERNEL_DIR" "$JACK_DIR" "$OUTPUT_DIR"
-rm -rf "$WORKSPACE/repack" "$WORKSPACE/verify_boot"
-rm -rf "$WORKSPACE/android-ndk-r26d" "$WORKSPACE/magisk_extract"
-rm -f "$WORKSPACE/ksud" "$WORKSPACE/final_boot.img"
-rm -f "$WORKSPACE/boot-stock.img" "$WORKSPACE/dtbo-stock.img"
+rm -rf "$KERNEL_DIR"
+rm -rf "$JACK_DIR"
+rm -rf "$OUTPUT_DIR"
+rm -rf "$WORKSPACE/repack"
+rm -rf "$WORKSPACE/verify_boot"
+rm -rf "$WORKSPACE/android-ndk-r26d"
+rm -rf "$WORKSPACE/magisk_extract"
+
+rm -f "$WORKSPACE/ksud"
+rm -f "$WORKSPACE/final_boot.img"
+rm -f "$WORKSPACE/boot-stock.img"
+rm -f "$WORKSPACE/dtbo-stock.img"
 rm -f "$WORKSPACE/android-ndk-r26d-linux.zip"
 rm -f "$WORKSPACE/Magisk-v27.0.apk"
 
 mkdir -p "$OUTPUT_DIR"
 
-echo "Installation des dépendances"
-
 sudo apt-get update
+
 sudo apt-get install -y \
-    bc bison build-essential ccache clang curl \
-    device-tree-compiler flex gcc-aarch64-linux-gnu \
-    gcc-arm-linux-gnueabi git libelf-dev libncurses-dev \
-    libssl-dev lld llvm mkbootimg perl python3 unzip wget zip
+    bc \
+    bison \
+    build-essential \
+    ccache \
+    clang \
+    curl \
+    device-tree-compiler \
+    flex \
+    gcc-aarch64-linux-gnu \
+    gcc-arm-linux-gnueabi \
+    git \
+    libelf-dev \
+    libncurses-dev \
+    libssl-dev \
+    lld \
+    llvm \
+    mkbootimg \
+    perl \
+    python3 \
+    unzip \
+    wget \
+    zip
 
 echo "Clonage kernel"
 
@@ -53,20 +77,20 @@ git clone \
 
 cd "$KERNEL_DIR"
 
-KVER="$(awk '
-/^VERSION[[:space:]]*=/ {v=$3}
-/^PATCHLEVEL[[:space:]]*=/ {p=$3}
-END {print v "." p}
-' Makefile)"
+KVER="$(
+    awk '
+        /^VERSION[[:space:]]*=/ {v=$3}
+        /^PATCHLEVEL[[:space:]]*=/ {p=$3}
+        END {print v "." p}
+    ' Makefile
+)"
 
 if [ "$KVER" != "4.19" ]; then
     echo "ERREUR: kernel $KVER"
     exit 1
 fi
 
-echo "Kernel Linux $KVER"
-
-if [ ! -f "arch/arm64/configs/vendor/lito-perf_defconfig" ]; then
+if [ ! -f "arch/arm64/configs/$DEFCONFIG" ]; then
     echo "ERREUR: $DEFCONFIG absent"
     exit 1
 fi
@@ -79,9 +103,7 @@ git clone \
     "$JACK_REPO" \
     "$JACK_DIR"
 
-echo "Intégration Backslashxx KernelSU"
-
-rm -rf "$KERNEL_DIR/KernelSU"
+echo "Clonage Backslashxx KernelSU"
 
 git clone \
     https://github.com/backslashxx/KernelSU.git \
@@ -106,18 +128,6 @@ if [ ! -L "$KERNEL_DIR/drivers/kernelsu" ]; then
     exit 1
 fi
 
-if ! grep -q 'obj-\$(CONFIG_KSU) += kernelsu/' \
-    "$KERNEL_DIR/drivers/Makefile"; then
-    echo "ERREUR: KernelSU absent de drivers/Makefile"
-    exit 1
-fi
-
-if ! grep -q 'drivers/kernelsu/Kconfig' \
-    "$KERNEL_DIR/drivers/Kconfig"; then
-    echo "ERREUR: KernelSU absent de drivers/Kconfig"
-    exit 1
-fi
-
 echo "KernelSU intégré"
 
 echo "Configuration kernel"
@@ -128,8 +138,6 @@ make \
     CROSS_COMPILE="$CROSS_COMPILE" \
     CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
     "$DEFCONFIG"
-
-echo "Activation KSU"
 
 scripts/config --file "$OUT_DIR/.config" \
     --enable KPROBES \
@@ -147,28 +155,15 @@ make \
     CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
     olddefconfig
 
-echo "Vérification KSU"
-
-grep -q '^CONFIG_KPROBES=y$' "$OUT_DIR/.config" || {
-    echo "ERREUR: CONFIG_KPROBES absent"
-    exit 1
-}
-
-grep -q '^CONFIG_KSU=y$' "$OUT_DIR/.config" || {
-    echo "ERREUR: CONFIG_KSU absent"
-    exit 1
-}
-
-grep -q '^CONFIG_EXT4_FS=y$' "$OUT_DIR/.config" || {
-    echo "ERREUR: CONFIG_EXT4_FS absent"
-    exit 1
-}
+grep -q '^CONFIG_KPROBES=y$' "$OUT_DIR/.config"
+grep -q '^CONFIG_KSU=y$' "$OUT_DIR/.config"
+grep -q '^CONFIG_EXT4_FS=y$' "$OUT_DIR/.config"
 
 echo "KPROBES=OK"
 echo "KSU=OK"
 echo "EXT4_FS=OK"
 
-echo "Application SuSFS JackA1ltman"
+echo "Application patch SuSFS"
 
 PATCH_419="$(
     find "$JACK_DIR/Patches" \
@@ -179,12 +174,11 @@ PATCH_419="$(
 )"
 
 if [ -z "$PATCH_419" ]; then
-    echo "ERREUR: patch SuSFS 4.19 introuvable"
-    find "$JACK_DIR/Patches" -type f -name '*.patch' | sort
+    echo "ERREUR: patch SuSFS 4.19 absent"
     exit 1
 fi
 
-echo "Patch: $PATCH_419"
+PATCH_STATUS=0
 
 patch \
     -p1 \
@@ -192,26 +186,55 @@ patch \
     < "$PATCH_419" \
     2>&1 | tee "$OUTPUT_DIR/susfs-patch.log" || PATCH_STATUS=$?
 
-PATCH_STATUS="${PATCH_STATUS:-0}"
+REJ_DIR="$OUTPUT_DIR/rejects"
+mkdir -p "$REJ_DIR"
 
-if find "$KERNEL_DIR" \
-    -type f \
-    -name '*.rej' \
-    | grep -q .; then
+REJ_FOUND=0
 
-    echo "ERREUR: .rej détecté"
+while IFS= read -r rej; do
+    REJ_FOUND=1
 
+    relative="${rej#$KERNEL_DIR/}"
+    destination="$REJ_DIR/$relative"
+
+    mkdir -p "$(dirname "$destination")"
+    cp "$rej" "$destination"
+
+done < <(
     find "$KERNEL_DIR" \
         -type f \
         -name '*.rej' \
         -print
+)
 
-    exit 1
+if [ "$REJ_FOUND" -eq 1 ]; then
+
+    mkdir -p "$OUTPUT_DIR/rejects/sources"
+
+    for source in \
+        fs/namespace.c \
+        fs/proc/task_mmu.c \
+        fs/stat.c
+    do
+        if [ -f "$KERNEL_DIR/$source" ]; then
+            destination="$OUTPUT_DIR/rejects/sources/$source"
+            mkdir -p "$(dirname "$destination")"
+            cp "$KERNEL_DIR/$source" "$destination"
+        fi
+    done
+
+    cp "$OUT_DIR/.config" \
+        "$OUTPUT_DIR/rejects/kernel.config" \
+        2>/dev/null || true
+
+    echo "ERREUR: hunks SuSFS rejetés"
+    echo "Les .rej sont dans output/rejects/"
+    exit 2
 fi
 
 if [ "$PATCH_STATUS" -ne 0 ]; then
-    echo "ERREUR: patch SuSFS non appliqué"
-    exit 1
+    echo "ERREUR: patch SuSFS"
+    exit "$PATCH_STATUS"
 fi
 
 echo "SuSFS patch appliqué"
@@ -254,33 +277,31 @@ for CONFIG_NAME in \
     CONFIG_KSU_SUSFS_SUS_MAP
 do
     grep -q "^${CONFIG_NAME}=y$" "$OUT_DIR/.config" || {
-        echo "ERREUR: $CONFIG_NAME absent après olddefconfig"
+        echo "ERREUR: $CONFIG_NAME absent"
         exit 1
     }
 done
 
-echo "Configuration SuSFS OK"
+echo "SuSFS configuration OK"
 
 echo "Patch tactile Motorola"
 
 TOUCH_FILE="$KERNEL_DIR/techpack/display/msm/msm_drv.c"
-
-if [ ! -f "$TOUCH_FILE" ]; then
-    echo "ERREUR: $TOUCH_FILE absent"
-    exit 1
-fi
 
 python3 - "$TOUCH_FILE" <<'PY'
 from pathlib import Path
 import sys
 
 path = Path(sys.argv[1])
+
+if not path.exists():
+    raise SystemExit("ERREUR: msm_drv.c absent")
+
 text = path.read_text()
 
 if "motorola_panel_notifier_list" not in text:
     text += r'''
 
-/* Motorola touchscreen compatibility */
 #include <linux/notifier.h>
 #include <linux/module.h>
 
@@ -308,10 +329,9 @@ EXPORT_SYMBOL(touch_set_state);
 '''
 
     path.write_text(text)
+PY
 
-grep_text="motorola_panel_notifier_list"
-
-grep -q "$grep_text" "$TOUCH_FILE"
+grep -q "motorola_panel_notifier_list" "$TOUCH_FILE"
 grep -q "panel_register_notifier" "$TOUCH_FILE"
 grep -q "panel_unregister_notifier" "$TOUCH_FILE"
 grep -q "touch_set_state" "$TOUCH_FILE"
@@ -332,7 +352,7 @@ make \
 KERNEL_IMAGE="$OUT_DIR/arch/arm64/boot/Image"
 
 if [ ! -s "$KERNEL_IMAGE" ]; then
-    echo "ERREUR: Image absente"
+    echo "ERREUR: Image kernel absente"
     exit 1
 fi
 
@@ -414,7 +434,7 @@ cd "$WORKSPACE"
 curl -fL "$BOOT_URL" -o boot-stock.img
 curl -fL "$DTBO_URL" -o dtbo-stock.img
 
-echo "Téléchargement Magiskboot"
+echo "Préparation Magiskboot"
 
 wget -q \
     https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk \
@@ -433,23 +453,21 @@ cp \
 
 chmod 755 repack/magiskboot
 
-echo "Unpack boot"
-
 cp boot-stock.img repack/boot.img
 
 cd repack
 
 ./magiskboot unpack boot.img
 
-if [ ! -f kernel ]; then
-    echo "ERREUR: kernel stock non extrait"
+[ -f kernel ] || {
+    echo "ERREUR: kernel stock absent"
     exit 1
-fi
+}
 
-if [ ! -d ramdisk ]; then
+[ -d ramdisk ] || {
     echo "ERREUR: ramdisk absent"
     exit 1
-fi
+}
 
 cp "$KERNEL_IMAGE" kernel
 
@@ -458,23 +476,21 @@ mkdir -p ramdisk/data/adb
 cp "$WORKSPACE/ksud" ramdisk/data/adb/ksud
 chmod 755 ramdisk/data/adb/ksud
 
-echo "Repack boot"
-
 ./magiskboot repack boot.img new-boot.img
 
-if [ ! -s new-boot.img ]; then
+[ -s new-boot.img ] || {
     echo "ERREUR: repack boot échoué"
     exit 1
-fi
+}
 
 mv new-boot.img "$WORKSPACE/final_boot.img"
 
-echo "Vérification finale"
+echo "Vérification boot"
 
+rm -rf "$WORKSPACE/verify_boot"
 mkdir -p "$WORKSPACE/verify_boot"
 
-cp "$WORKSPACE/final_boot.img" \
-    "$WORKSPACE/verify_boot/boot.img"
+cp "$WORKSPACE/final_boot.img" "$WORKSPACE/verify_boot/boot.img"
 
 cd "$WORKSPACE/verify_boot"
 
@@ -489,8 +505,6 @@ cd "$WORKSPACE/verify_boot"
     echo "ERREUR: ksud absent du boot final"
     exit 1
 }
-
-echo "Création artifacts"
 
 cd "$WORKSPACE"
 
@@ -508,4 +522,8 @@ cp "$OUT_DIR/.config" \
 
 echo "BUILD OK"
 
-ls -lh "$OUTPUT_DIR"
+find "$OUTPUT_DIR" \
+    -maxdepth 4 \
+    -type f \
+    -print \
+    | sort
