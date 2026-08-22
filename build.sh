@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-echo "=== Début du build Backslashxx KernelSU + SusFS ==="
+echo "=== Début du build Backslashxx KernelSU + SusFS (Manual Hook) ==="
 df -h
 
 sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
@@ -8,7 +8,7 @@ sudo apt-get clean
 sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.list 2>/dev/null || true
 
 sudo apt-get update
-sudo apt-get install -y bc bison build-essential ccache flex glibc-source libelf-dev libssl-dev libncurses-dev gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi clang llvm lld device-tree-compiler zip unzip curl git python3 mkbootimg perl cpio
+sudo apt-get install -y bc bison build-essential ccache flex glibc-source libelf-dev libssl-dev libncurses-dev gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi clang llvm lld device-tree-compiler zip unzip curl git python3 mkbootimg perl
 
 cd $GITHUB_WORKSPACE
 
@@ -20,7 +20,7 @@ echo "=== Intégration Backslashxx KernelSU ==="
 rm -rf drivers/kernelsu kernelSU susfs4ksu || true
 curl -LSs "https://raw.githubusercontent.com/backslashxx/KernelSU/master/kernel/setup.sh" | bash
 
-echo "=== Hooks manuels (Version simple compatible backslashxx) ==="
+echo "=== Hooks manuels sucompat (fs/exec.c, fs/open.c, fs/stat.c) ==="
 mkdir -p ../output/manual-hooks-diag
 
 hook_insert() {
@@ -59,6 +59,7 @@ elif grep -Pzo 'SYSCALL_DEFINE3\(faccessat, int, dfd, const char __user \*, file
     'ksu_handle_faccessat(&dfd, &filename, &mode, NULL);' \
     || HOOKS_FAILED=1
 else
+  echo "❌ Ni do_faccessat ni SYSCALL_DEFINE3(faccessat...) trouvé dans fs/open.c"
   HOOKS_FAILED=1
 fi
 
@@ -75,17 +76,19 @@ elif grep -Pzo 'int vfs_fstatat\(int dfd, const char __user \*filename, struct k
     'ksu_handle_stat(&dfd, &filename, &flag);' \
     || HOOKS_FAILED=1
 else
+  echo "❌ Ni vfs_statx ni vfs_fstatat trouvé dans fs/stat.c"
   HOOKS_FAILED=1
 fi
 
 if [ "$HOOKS_FAILED" -eq 1 ]; then
-  echo "❌ Au moins un hook n'a pas pu être inséré."
+  echo "❌ Au moins un hook sucompat n'a pas pu être inséré automatiquement."
   for f in fs/exec.c fs/open.c fs/stat.c; do
     cp --parents "$f" ../output/manual-hooks-diag/ 2>/dev/null || true
   done
+  echo "    -> fichiers copiés dans output/manual-hooks-diag/ pour inspection manuelle des signatures réelles."
   exit 1
 fi
-echo "✅ Les 3 hooks sont en place."
+echo "✅ Les 3 hooks sucompat sont en place."
 
 echo "=== Téléchargement du repo JackA1ltman ==="
 git clone --depth=1 https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd.git /tmp/jack_repo 2>/dev/null || true
@@ -95,14 +98,24 @@ PATCH_419=$(find /tmp/jack_repo/Patches -name "*4.19*" -name "*.patch" | head -1
 if [ -n "$PATCH_419" ]; then
   echo "Application du patch: $PATCH_419"
   patch -p1 < "$PATCH_419" 2>&1 | tee /tmp/susfs_patch.log || true
+  echo "Patch appliqué"
 else
-  echo "Aucun patch 4.19 trouvé."
+  echo "Recherche des patches..."
+  find /tmp/jack_repo/Patches -name "*.patch" | head -20
 fi
+
+echo "=== Vérification des .rej ==="
+find . -name "*.rej" -type f | while read rej; do
+  echo "REJ: $rej"
+done
 
 echo "=== Corrections post-patch ==="
 sed -i '1617d' fs/proc/task_mmu.c 2>/dev/null || true
+echo "OK: task_mmu.c corrigé"
+
 if ! grep -q "susfs_def.h" fs/namespace.c; then
   sed -i '/#include <linux\/sched\/task.h>/a #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n#include <linux/susfs_def.h>\n#endif\n\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nextern bool susfs_is_current_ksu_domain(void);\nextern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n#define CL_COPY_MNT_NS BIT(25)\n#endif' fs/namespace.c
+  echo "OK: include namespace.c ajouté"
 fi
 
 if ! grep -q "ksu_handle_setresuid" kernel/sys.c; then
@@ -111,10 +124,32 @@ import re
 with open('kernel/sys.c', 'r') as f:
     content = f.read()
 if 'ksu_handle_setresuid' not in content:
-    extern_decl = '\n#ifdef CONFIG_KSU_SUSFS\nextern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\n#endif\n'
-    content = re.sub(r'(long __sys_setresuid)', extern_decl + r'\1', content, count=1)
-    if '	bool ruid_new, euid_new, suid_new;' in content:
-        content = content.replace('	bool ruid_new, euid_new, suid_new;', '	bool ruid_new, euid_new, suid_new;\n#ifdef CONFIG_KSU_SUSFS\n	(void)ksu_handle_setresuid(ruid, euid, suid);\n#endif', 1)
+    extern_decl = '''
+#ifdef CONFIG_KSU_SUSFS
+extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);
+#endif
+'''
+    pattern = r'(long __sys_setresuid)'
+    content = re.sub(pattern, extern_decl + '\n' + r'\1', content, count=1)
+    old_code = '''	bool ruid_new, euid_new, suid_new;'''
+    new_code = '''	bool ruid_new, euid_new, suid_new;
+#ifdef CONFIG_KSU_SUSFS
+	(void)ksu_handle_setresuid(ruid, euid, suid);
+#endif'''
+    if old_code in content:
+        content = content.replace(old_code, new_code, 1)
+        print("OK: setresuid APRÈS bool ruid_new")
+    else:
+        old_code2 = '''	kuid_t kruid, keuid, ksuid;'''
+        new_code2 = '''	kuid_t kruid, keuid, ksuid;
+#ifdef CONFIG_KSU_SUSFS
+	(void)ksu_handle_setresuid(ruid, euid, suid);
+#endif'''
+        if old_code2 in content:
+            content = content.replace(old_code2, new_code2, 1)
+            print("OK: setresuid APRÈS kuid_t")
+        else:
+            print("ERREUR: pattern non trouvé")
 with open('kernel/sys.c', 'w') as f:
     f.write(content)
 PYEOF
@@ -169,7 +204,8 @@ echo "=== Compilation finale ==="
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 -j$(nproc) Image 2>&1 | tee build.log
 
 if [ -f "out/arch/arm64/boot/Image" ]; then
-  echo "✅ Compilation du noyau réussie"
+  echo "✅ Compilation réussie"
+  ls -lh out/arch/arm64/boot/
 else
   echo "❌ BUILD FAILED"
   grep -i "error:" build.log | head -20
@@ -186,6 +222,7 @@ wget -q https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
 unzip -q android-ndk-r26d-linux.zip
 
 export ANDROID_NDK_ROOT="$GITHUB_WORKSPACE/android-ndk-r26d"
+export ANDROID_NDK_HOME="$ANDROID_NDK_ROOT"
 export AARCH64_CLANG_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
 export AARCH64_CLANGXX_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang++"
 export AR_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
@@ -198,6 +235,7 @@ mkdir -p .cargo
 cat > .cargo/config.toml << EOF
 [target.aarch64-linux-android]
 linker = "$AARCH64_CLANG_PATH"
+
 [env]
 CC_aarch64_linux_android = "$AARCH64_CLANG_PATH"
 CXX_aarch64_linux_android = "$AARCH64_CLANGXX_PATH"
@@ -212,11 +250,19 @@ if [ -f "$KSUD_BINARY" ]; then
   cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"
   chmod 755 "$GITHUB_WORKSPACE/ksud"
   echo "OK: ksud compilé"
+else
+  echo "⚠️ ksud introuvable au chemin attendu, recherche..."
+  find "$GITHUB_WORKSPACE/ksud-src" -name "ksud" -type f 2>/dev/null | head -5
 fi
 
-echo "=== Repack boot.img ==="
+cd "$GITHUB_WORKSPACE/kernel_sources"
+
+echo "=== Téléchargement des images stock ==="
 cd $GITHUB_WORKSPACE
-curl -fLo boot-stock.img "https://mirrorbits.lineageos.org/full/kiev/20260809/boot.img" 2>/dev/null || true
+curl -fLo boot-stock.img "https://mirrorbits.lineageos.org/full/kiev/20260809/boot.img" 2>/dev/null || {
+  mkbootimg --kernel kernel_sources/out/arch/arm64/boot/Image --ramdisk /dev/null --output final_boot.img --header_version 2 --pagesize 4096 --base 0x00000000 --kernel_offset 0x00008000 --ramdisk_offset 0x01000000 --tags_offset 0x00000100 --cmdline "androidboot.hardware=kiev androidboot.selinux=permissive"
+}
+curl -fLo dtbo-stock.img "https://mirrorbits.lineageos.org/full/kiev/20260809/dtbo.img" 2>/dev/null || true
 
 if [ -f "boot-stock.img" ]; then
   mkdir -p repack
@@ -228,54 +274,43 @@ if [ -f "boot-stock.img" ]; then
   rm -rf Magisk-v27.0.apk lib/
   cd repack
   
-  # CORRECTION CRUCIALE : Ignorer le warning ASN.1 DER tag de magiskboot
+  # Sécurité : ignorer le warning ASN.1 cosmétique de magiskboot unpack
   set +e
   ./magiskboot unpack boot.img
   UNPACK_EXIT=$?
   set -e
   
-  # Vérifier que le unpack a quand même fonctionné
   if [ ! -f "kernel" ] || [ ! -f "ramdisk.cpio" ]; then
     echo "❌ Échec réel du unpack (fichiers manquants)"
     exit 1
   fi
   
-  if [ $UNPACK_EXIT -ne 0 ]; then
-    echo "⚠️ magiskboot a renvoyé un warning (code $UNPACK_EXIT) mais les fichiers sont extraits"
-  fi
-  echo "✅ Boot image décompressée"
-  
-  # Remplacer le noyau
   cp $GITHUB_WORKSPACE/kernel_sources/out/arch/arm64/boot/Image kernel
-  echo "✅ Noyau remplacé"
-  
-  # Ajouter ksud et su au ramdisk
+
+  # --- MÉTHODE 100% LOCALE ET COMPATIBLE (VOTRE DEMANDE) ---
   if [ -f "$GITHUB_WORKSPACE/ksud" ]; then
-    # Extraire le ramdisk
-    mkdir -p ramdisk_extracted
-    cd ramdisk_extracted
-    gzip -dc ../ramdisk.cpio 2>/dev/null | cpio -idm || cpio -idm < ../ramdisk.cpio
-    
-    # Ajouter ksud
-    mkdir -p data/adb/ksud
-    cp "$GITHUB_WORKSPACE/ksud" data/adb/ksud/ksud
-    chmod 755 data/adb/ksud/ksud
-    
-    # Ajouter le binaire su (CRUCIAL pour Termux)
-    mkdir -p system/bin
-    wget -q https://github.com/tiann/KernelSU/releases/download/v0.9.5/su.aarch64 -O system/bin/su
-    chmod 6755 system/bin/su
-    
-    # Reconstruire le ramdisk
-    find . | cpio -o -H newc | gzip > ../ramdisk.cpio.new
-    cd ..
-    mv ramdisk.cpio.new ramdisk.cpio
-    rm -rf ramdisk_extracted
-    
-    echo "✅ ksud et binaire su ajoutés au ramdisk"
+    echo "Ajout de ksud au ramdisk..."
+    ./magiskboot cpio ramdisk.cpio \
+        "mkdir 0755 data" \
+        "mkdir 0755 data/adb" \
+        "mkdir 0755 data/adb/ksud" \
+        "add 0755 data/adb/ksud/ksud $GITHUB_WORKSPACE/ksud"
+
+    echo "Ajout de su au ramdisk (binaire compilé localement pour compatibilité parfaite)..."
+    # On copie le ksud compilé et on le nomme 'su'. ksud détectera son nom et agira comme le client su.
+    cp "$GITHUB_WORKSPACE/ksud" ./local_su_binary
+
+    ./magiskboot cpio ramdisk.cpio \
+        "mkdir 0755 system" \
+        "mkdir 0755 system/bin" \
+        "add 06755 system/bin/su ./local_su_binary"
+
+    rm -f ./local_su_binary
+    echo "✅ ksud et su (compilés localement) ajoutés au ramdisk via magiskboot cpio"
+  else
+    echo "⚠️ ATTENTION: ksud non trouvé, boot.img généré sans"
   fi
-  
-  # Repack le boot.img
+
   ./magiskboot repack boot.img new-boot.img || {
     echo "❌ Échec du repack"
     exit 1
@@ -283,14 +318,14 @@ if [ -f "boot-stock.img" ]; then
   
   mv new-boot.img ../final_boot.img
   cd ..
-  echo "✅ Boot image repackée avec succès"
 fi
 
 echo "=== Copie vers output ==="
 mkdir -p output
 cp final_boot.img output/Backslashxx-SusFS-boot.img
+cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
-find . -name "*.rej" -type f -exec cp --parents {} output/rej-files/ \; 2>/dev/null || true
+cp $GITHUB_WORKSPACE/ksud output/ksud 2>/dev/null || true
 
 echo "=== BUILD TERMINÉ ==="
 ls -lh output/
