@@ -15,7 +15,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run build
+      - name: Build
         run: |
           chmod +x build.sh
           bash build.sh
