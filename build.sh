@@ -237,22 +237,54 @@ if [ -f "boot-stock.img" ]; then
   chmod +x repack/magiskboot
   rm -rf Magisk-v27.0.apk lib/
   cd repack
-  ./magiskboot unpack boot.img
+  
+  # CORRECTION : Ignorer l'erreur ASN.1 DER tag de magiskboot
+  # Le unpack fonctionne malgré le warning
+  ./magiskboot unpack boot.img || {
+    echo "⚠️ magiskboot a affiché un warning mais continue..."
+    # Vérifier quand même que les fichiers essentiels sont là
+    if [ ! -f "kernel" ] || [ ! -f "ramdisk.cpio" ]; then
+      echo "❌ Échec réel du unpack (fichiers manquants)"
+      exit 1
+    fi
+    echo "✅ Fichiers extraits malgré le warning"
+  }
+  
+  # Remplacer le noyau
   cp $GITHUB_WORKSPACE/kernel_sources/out/arch/arm64/boot/Image kernel
-
+  
+  # Ajouter ksud et su au ramdisk
   if [ -f "$GITHUB_WORKSPACE/ksud" ]; then
-    mkdir -p ramdisk/data/adb/ksud
-    cp "$GITHUB_WORKSPACE/ksud" ramdisk/data/adb/ksud/ksud
-    chmod 755 ramdisk/data/adb/ksud/ksud
+    # Extraire le ramdisk
+    mkdir -p ramdisk_extracted
+    cd ramdisk_extracted
+    cpio -idm < ../ramdisk.cpio
     
-    # Sécurité : ajouter le binaire su directement dans le ramdisk
-    mkdir -p ramdisk/system/bin
-    wget -q https://github.com/tiann/KernelSU/releases/download/v0.9.5/su.aarch64 -O ramdisk/system/bin/su
-    chmod 6755 ramdisk/system/bin/su
+    # Ajouter ksud
+    mkdir -p data/adb/ksud
+    cp "$GITHUB_WORKSPACE/ksud" data/adb/ksud/ksud
+    chmod 755 data/adb/ksud/ksud
+    
+    # Ajouter le binaire su (CRUCIAL pour Termux)
+    mkdir -p system/bin
+    wget -q https://github.com/tiann/KernelSU/releases/download/v0.9.5/su.aarch64 -O system/bin/su
+    chmod 6755 system/bin/su
+    
+    # Reconstruire le ramdisk
+    find . | cpio -o -H newc > ../ramdisk.cpio.new
+    cd ..
+    mv ramdisk.cpio.new ramdisk.cpio
+    rm -rf ramdisk_extracted
+    
     echo "✅ ksud et binaire su ajoutés au ramdisk"
   fi
-
-  ./magiskboot repack boot.img new-boot.img
+  
+  # Repack le boot.img
+  ./magiskboot repack boot.img new-boot.img || {
+    echo "❌ Échec du repack"
+    exit 1
+  }
+  
   mv new-boot.img ../final_boot.img
   cd ..
 fi
