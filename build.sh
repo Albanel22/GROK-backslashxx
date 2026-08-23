@@ -119,18 +119,48 @@ echo "=== Application du patch SusFS 4.19 ==="
 PATCH_419=$(find /tmp/jack_repo/Patches -name "*4.19*" -name "*.patch" | head -1)
 
 if [ -n "$PATCH_419" ]; then
-  echo "=== Application SUSFS patch ==="
-  echo "Patch trouvé : $PATCH_419"
+  echo "Application du patch: $PATCH_419"
 
+  set +e
   patch -p1 < "$PATCH_419" 2>&1 | tee /tmp/susfs_patch.log
+  PATCH_STATUS=${PIPESTATUS[0]}
+  set -e
 
-  if grep -q "FAILED" /tmp/susfs_patch.log; then
-    echo "❌ Patch SUSFS échoué"
-    exit 1
+  echo "Code patch SUSFS: $PATCH_STATUS"
+
+  echo "=== Vérification immédiate des .rej ==="
+
+  REJECTED=0
+
+  while IFS= read -r rej; do
+    REJECTED=1
+    echo "========================================"
+    echo "REJET SUSFS: $rej"
+    echo "========================================"
+    cat "$rej"
+    echo
+  done < <(find . -name "*.rej" -type f)
+
+  mkdir -p "$GITHUB_WORKSPACE/output/susfs-diagnostic"
+
+  cp /tmp/susfs_patch.log \
+    "$GITHUB_WORKSPACE/output/susfs-diagnostic/" \
+    2>/dev/null || true
+
+  find . -name "*.rej" -type f -exec cp --parents {} \
+    "$GITHUB_WORKSPACE/output/susfs-diagnostic/" \; \
+    2>/dev/null || true
+
+  if [ "$REJECTED" -eq 1 ]; then
+    echo "⚠️ SUSFS contient des rejets."
+    echo "⚠️ Le build continue uniquement pour produire le diagnostic."
+  else
+    echo "✅ SUSFS appliqué sans rejet."
   fi
 
 else
-  echo "❌ Aucun patch SUSFS 4.19 trouvé"
+  echo "❌ Patch SUSFS 4.19 introuvable."
+  find /tmp/jack_repo/Patches -name "*.patch" | head -20
   exit 1
 fi
 
