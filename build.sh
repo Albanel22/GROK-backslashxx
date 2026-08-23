@@ -1,3 +1,4 @@
+```bash
 #!/bin/bash
 set -e
 
@@ -23,90 +24,31 @@ echo "=== Intégration Backslashxx KernelSU ==="
 rm -rf drivers/kernelsu kernelSU susfs4ksu || true
 curl -LSs "https://raw.githubusercontent.com/backslashxx/KernelSU/master/kernel/setup.sh" | bash
 
-echo "=== Hooks manuels sucompat (fs/exec.c, fs/open.c, fs/stat.c) ==="
+echo "=== Hooks Manual Hook présents dans le fork ==="
 
-mkdir -p ../output/manual-hooks-diag
-
-hook_insert() {
-  local file="$1" sig_re="$2" extern_block="$3" call_line="$4"
-
-  if [ ! -f "$file" ]; then
-    echo "❌ $file introuvable."
-    return 1
+for f in fs/exec.c fs/open.c fs/stat.c; do
+  if [ ! -f "$f" ]; then
+    echo "❌ $f introuvable."
+    exit 1
   fi
+done
 
-  if ! grep -Pzo "$sig_re" "$file" > /dev/null 2>&1; then
-    echo "❌ Signature attendue introuvable dans $file — hook NON inséré."
-    return 1
-  fi
-
-  perl -0777 -i -pe "s/($sig_re)/${extern_block}\$1\n#ifdef CONFIG_KSU\n#pragma GCC diagnostic ignored \x22-Wdeclaration-after-statement\x22\n${call_line}\n#endif\n/s" "$file"
-
-  echo "[+] Hook inséré dans $file"
-  return 0
-}
-
-HOOKS_FAILED=0
-
-hook_insert "fs/exec.c" \
-  '(?s)static int do_execveat_common\(.*?int flags\)\s*\n\{' \
-  '#ifdef CONFIG_KSU\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,\n\t\t\t\t\t void *envp, int *flags);\n#endif\n' \
-  'ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);' \
-  || HOOKS_FAILED=1
-
-if grep -Pzo 'long do_faccessat\(int dfd, const char __user \*filename, int mode\)\s*\n\{' fs/open.c > /dev/null 2>&1; then
-
-  hook_insert "fs/open.c" \
-    'long do_faccessat\(int dfd, const char __user \*filename, int mode\)\s*\n\{' \
-    '#ifdef CONFIG_KSU\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode,\n\t\t\t\t int *flags);\n#endif\n' \
-    'ksu_handle_faccessat(&dfd, &filename, &mode, NULL);' \
-    || HOOKS_FAILED=1
-
-elif grep -Pzo 'SYSCALL_DEFINE3\(faccessat, int, dfd, const char __user \*, filename, int, mode\)\s*\n\{' fs/open.c > /dev/null 2>&1; then
-
-  hook_insert "fs/open.c" \
-    'SYSCALL_DEFINE3\(faccessat, int, dfd, const char __user \*, filename, int, mode\)\s*\n\{' \
-    '#ifdef CONFIG_KSU\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode,\n\t\t\t\t int *flags);\n#endif\n' \
-    'ksu_handle_faccessat(&dfd, &filename, &mode, NULL);' \
-    || HOOKS_FAILED=1
-
-else
-  echo "❌ Ni do_faccessat ni SYSCALL_DEFINE3(faccessat...) trouvé dans fs/open.c"
-  HOOKS_FAILED=1
-fi
-
-if grep -Pzo 'int vfs_statx\(int dfd, const char __user \*filename, int flags,' fs/stat.c > /dev/null 2>&1; then
-
-  hook_insert "fs/stat.c" \
-    'int vfs_statx\(int dfd, const char __user \*filename, int flags,[^{]*\{' \
-    '#ifdef CONFIG_KSU\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n#endif\n' \
-    'ksu_handle_stat(&dfd, &filename, &flags);' \
-    || HOOKS_FAILED=1
-
-elif grep -Pzo 'int vfs_fstatat\(int dfd, const char __user \*filename, struct kstat \*stat,\s*\n\s*int flag\)\s*\n\{' fs/stat.c > /dev/null 2>&1; then
-
-  hook_insert "fs/stat.c" \
-    'int vfs_fstatat\(int dfd, const char __user \*filename, struct kstat \*stat,\s*\n\s*int flag\)\s*\n\{' \
-    '#ifdef CONFIG_KSU\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n#endif\n' \
-    'ksu_handle_stat(&dfd, &filename, &flag);' \
-    || HOOKS_FAILED=1
-
-else
-  echo "❌ Ni vfs_statx ni vfs_fstatat trouvé dans fs/stat.c"
-  HOOKS_FAILED=1
-fi
-
-if [ "$HOOKS_FAILED" -eq 1 ]; then
-  echo "❌ Au moins un hook sucompat n'a pas pu être inséré automatiquement."
-
-  for f in fs/exec.c fs/open.c fs/stat.c; do
-    cp --parents "$f" ../output/manual-hooks-diag/ 2>/dev/null || true
-  done
-
+if ! grep -q "ksu_handle_execveat" fs/exec.c; then
+  echo "❌ ksu_handle_execveat absent de fs/exec.c"
   exit 1
 fi
 
-echo "✅ Les 3 hooks sucompat sont en place."
+if ! grep -q "ksu_handle_faccessat" fs/open.c; then
+  echo "❌ ksu_handle_faccessat absent de fs/open.c"
+  exit 1
+fi
+
+if ! grep -q "ksu_handle_stat" fs/stat.c; then
+  echo "❌ ksu_handle_stat absent de fs/stat.c"
+  exit 1
+fi
+
+echo "✅ Les 3 hooks Manual Hook sont présents."
 
 echo "=== Téléchargement du repo JackA1ltman ==="
 
@@ -199,7 +141,6 @@ import re
 with open('fs/namespace.c', 'r') as f:
     content = f.read()
 
-# Ajouter la fonction susfs_alloc_non_unshare_ksu_vfsmnt
 if 'susfs_alloc_non_unshare_ksu_vfsmnt' not in content:
     susfs_func = '''
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
@@ -255,7 +196,6 @@ out_free_cache:
     content = re.sub(pattern, susfs_func + '\n' + r'\1', content, count=1)
     print("OK: susfs_alloc_non_unshare_ksu_vfsmnt ajoutée")
 
-# Corriger vfs_create_mount
 old_code = '''	mnt = alloc_vfsmnt(fc->source ?: "none");'''
 new_code = '''#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 	if (static_branch_unlikely(&susfs_is_sdcard_android_data_not_decrypted)) {
@@ -287,7 +227,6 @@ import re
 with open('fs/proc/task_mmu.c', 'r') as f:
     content = f.read()
 
-# Ajouter la déclaration vma si nécessaire
 if 'struct vm_area_struct *vma;' not in content:
     old_decl = '''	int ret = 0, copied = 0;'''
     new_decl = '''	int ret = 0, copied = 0;
@@ -579,3 +518,4 @@ cp "$GITHUB_WORKSPACE/ksud" \
 echo "=== BUILD TERMINÉ ==="
 
 ls -lh output/
+```
