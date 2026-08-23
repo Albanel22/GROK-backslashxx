@@ -26,30 +26,6 @@ curl -LSs "https://raw.githubusercontent.com/backslashxx/KernelSU/master/kernel/
 echo "=== Les hooks manuels sont déjà intégrés dans le fork ==="
 echo "=== Les modifications SusFS manuelles sont déjà intégrées dans le fork ==="
 
-echo "=== Téléchargement du repo JackA1ltman ==="
-
-git clone --depth=1 \
-  https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd.git \
-  /tmp/jack_repo 2>/dev/null || true
-
-echo "=== Application du patch SusFS 4.19 ==="
-
-PATCH_419=$(find /tmp/jack_repo/Patches -name "*4.19*" -name "*.patch" | head -1)
-
-if [ -n "$PATCH_419" ]; then
-  echo "Application du patch: $PATCH_419"
-  patch -p1 < "$PATCH_419" 2>&1 | tee /tmp/susfs_patch.log || true
-else
-  echo "Recherche des patches..."
-  find /tmp/jack_repo/Patches -name "*.patch" | head -20
-fi
-
-echo "=== Vérification des .rej ==="
-
-find . -name "*.rej" -type f | while read -r rej; do
-  echo "REJ: $rej"
-done
-
 echo "=== Configuration ==="
 
 export ARCH=arm64
