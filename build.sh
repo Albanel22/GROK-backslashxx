@@ -212,6 +212,35 @@ else
   exit 1
 fi
 
+echo "=== Vérification KernelSU dans le kernel Image ==="
+
+echo "--- Configuration KernelSU ---"
+grep -E "CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK|CONFIG_KSU_SUSFS" out/.config || true
+
+echo ""
+echo "--- Symboles KernelSU dans Image ---"
+strings out/arch/arm64/boot/Image | grep -i "ksu_" | head -50 || true
+
+echo ""
+echo "--- Sources KernelSU présentes ---"
+if [ -d "drivers/kernelsu" ]; then
+  ls -la drivers/kernelsu | head -20
+  echo "✅ drivers/kernelsu trouvé"
+else
+  echo "❌ drivers/kernelsu absent"
+fi
+
+echo ""
+echo "--- Vérification ksud ---"
+if [ -f "$GITHUB_WORKSPACE/ksud" ]; then
+  ls -lh "$GITHUB_WORKSPACE/ksud"
+  echo "✅ ksud présent"
+else
+  echo "❌ ksud absent"
+fi
+
+echo "=== Fin vérification KernelSU ==="
+
 echo "=== Compilation de ksud (Rust + NDK) ==="
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
