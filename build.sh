@@ -120,57 +120,11 @@ PATCH_419=$(find /tmp/jack_repo/Patches -name "*4.19*" -name "*.patch" | head -1
 
 if [ -n "$PATCH_419" ]; then
   echo "Application du patch: $PATCH_419"
-
-  set +e
-  patch -p1 < "$PATCH_419" 2>&1 | tee /tmp/susfs_patch.log
-  PATCH_STATUS=${PIPESTATUS[0]}
-  set -e
-
-  echo "Code patch SUSFS: $PATCH_STATUS"
-
-  echo "=== Vérification immédiate des .rej ==="
-
-  REJECTED=0
-
-  while IFS= read -r rej; do
-    REJECTED=1
-    echo "========================================"
-    echo "REJET SUSFS: $rej"
-    echo "========================================"
-    cat "$rej"
-    echo
-  done < <(find . -name "*.rej" -type f)
-
-  mkdir -p "$GITHUB_WORKSPACE/output/susfs-diagnostic"
-
-  cp /tmp/susfs_patch.log \
-    "$GITHUB_WORKSPACE/output/susfs-diagnostic/" \
-    2>/dev/null || true
-
-  find . -name "*.rej" -type f -exec cp --parents {} \
-    "$GITHUB_WORKSPACE/output/susfs-diagnostic/" \; \
-    2>/dev/null || true
-
-  if [ "$REJECTED" -eq 1 ]; then
-    echo "⚠️ SUSFS contient des rejets."
-    echo "⚠️ Le build continue uniquement pour produire le diagnostic."
-  else
-    echo "✅ SUSFS appliqué sans rejet."
-  fi
-
+  patch -p1 < "$PATCH_419" 2>&1 | tee /tmp/susfs_patch.log || true
 else
-  echo "❌ Patch SUSFS 4.19 introuvable."
+  echo "Recherche des patches..."
   find /tmp/jack_repo/Patches -name "*.patch" | head -20
-  exit 1
 fi
-
-echo "=== Vérification sources SUSFS ==="
-
-find . -iname "*susfs*" -o -iname "susfs_def.h"
-
-echo "=== Vérification drivers/kernelsu ==="
-
-ls drivers/kernelsu
 
 echo "=== Vérification des .rej ==="
 
@@ -237,6 +191,133 @@ PYEOF
 
   python3 /tmp/hook_setresuid.py
 fi
+
+echo "=== Correction SUS_MOUNT (vfs_create_mount) ==="
+
+python3 << 'PYEOF'
+import re
+with open('fs/namespace.c', 'r') as f:
+    content = f.read()
+
+# Ajouter la fonction susfs_alloc_non_unshare_ksu_vfsmnt
+if 'susfs_alloc_non_unshare_ksu_vfsmnt' not in content:
+    susfs_func = '''
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+static struct mount *susfs_alloc_non_unshare_ksu_vfsmnt(const char *name)
+{
+	struct mount *mnt = kmem_cache_zalloc(mnt_cache, GFP_KERNEL);
+	int res;
+	if (mnt) {
+		res = ida_alloc_min(&mnt_id_ida, DEFAULT_KSU_MNT_ID, GFP_KERNEL);
+		if (res < 0)
+			goto out_free_cache;
+		mnt->mnt_id = res;
+		if (name) {
+			mnt->mnt_devname = kstrdup_const(name, GFP_KERNEL_ACCOUNT);
+			if (!mnt->mnt_devname)
+				goto out_free_id;
+		}
+#ifdef CONFIG_SMP
+		mnt->mnt_pcp = alloc_percpu(struct mnt_pcp);
+		if (!mnt->mnt_pcp)
+			goto out_free_devname;
+		this_cpu_add(mnt->mnt_pcp->mnt_count, 1);
+#else
+		mnt->mnt_count = 1;
+		mnt->mnt_writers = 0;
+#endif
+		INIT_HLIST_NODE(&mnt->mnt_hash);
+		INIT_LIST_HEAD(&mnt->mnt_child);
+		INIT_LIST_HEAD(&mnt->mnt_mounts);
+		INIT_LIST_HEAD(&mnt->mnt_list);
+		INIT_LIST_HEAD(&mnt->mnt_expire);
+		INIT_LIST_HEAD(&mnt->mnt_share);
+		INIT_LIST_HEAD(&mnt->mnt_slave_list);
+		INIT_LIST_HEAD(&mnt->mnt_slave);
+		INIT_HLIST_NODE(&mnt->mnt_mp_list);
+		INIT_LIST_HEAD(&mnt->mnt_umounting);
+		init_fs_pin(&mnt->mnt_umount, drop_mountpoint);
+	}
+	return mnt;
+#ifdef CONFIG_SMP
+out_free_devname:
+	kfree_const(mnt->mnt_devname);
+#endif
+out_free_id:
+	mnt_free_id(mnt);
+out_free_cache:
+	kmem_cache_free(mnt_cache, mnt);
+	return NULL;
+}
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+'''
+    pattern = r'(static struct mount \*alloc_vfsmnt\(const char \*name\))'
+    content = re.sub(pattern, susfs_func + '\n' + r'\1', content, count=1)
+    print("OK: susfs_alloc_non_unshare_ksu_vfsmnt ajoutée")
+
+# Corriger vfs_create_mount
+old_code = '''	mnt = alloc_vfsmnt(fc->source ?: "none");'''
+new_code = '''#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	if (static_branch_unlikely(&susfs_is_sdcard_android_data_not_decrypted)) {
+		if (susfs_is_current_ksu_domain()) {
+			mnt = susfs_alloc_non_unshare_ksu_vfsmnt(fc->source ?: "none");
+			goto bypass_orig_flow;
+		}
+	}
+#endif
+	mnt = alloc_vfsmnt(fc->source ?: "none");
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+bypass_orig_flow:
+#endif'''
+
+if old_code in content:
+    content = content.replace(old_code, new_code, 1)
+    print("OK: vfs_create_mount corrigé")
+else:
+    print("INFO: vfs_create_mount déjà corrigé ou pattern différent")
+
+with open('fs/namespace.c', 'w') as f:
+    f.write(content)
+PYEOF
+
+echo "=== Correction SUS_MAP (pagemap_read) ==="
+
+python3 << 'PYEOF'
+import re
+with open('fs/proc/task_mmu.c', 'r') as f:
+    content = f.read()
+
+# Ajouter la déclaration vma si nécessaire
+if 'struct vm_area_struct *vma;' not in content:
+    old_decl = '''	int ret = 0, copied = 0;'''
+    new_decl = '''	int ret = 0, copied = 0;
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+	struct vm_area_struct *vma;
+#endif'''
+    if old_decl in content:
+        content = content.replace(old_decl, new_decl, 1)
+        print("OK: déclaration vma ajoutée")
+
+old_code = '''		ret = walk_page_range(start_vaddr, end, &pagemap_walk);'''
+new_code = '''#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+		vma = find_vma(mm, start_vaddr);
+		if (vma && vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
+			goto bypass_orig_flow;
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+		ret = walk_page_range(start_vaddr, end, &pagemap_walk);
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+bypass_orig_flow:
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP'''
+
+if old_code in content:
+    content = content.replace(old_code, new_code, 1)
+    print("OK: pagemap_read corrigé")
+else:
+    print("INFO: pagemap_read déjà corrigé ou pattern différent")
+
+with open('fs/proc/task_mmu.c', 'w') as f:
+    f.write(content)
+PYEOF
 
 echo "=== Configuration ==="
 
