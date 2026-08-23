@@ -1,4 +1,3 @@
-```bash
 #!/bin/bash
 set -e
 
@@ -311,4 +310,4 @@ cp "$GITHUB_WORKSPACE/ksud" \
 echo "=== BUILD TERMINÉ ==="
 
 ls -lh output/
-```
+
