@@ -119,12 +119,28 @@ echo "=== Application du patch SusFS 4.19 ==="
 PATCH_419=$(find /tmp/jack_repo/Patches -name "*4.19*" -name "*.patch" | head -1)
 
 if [ -n "$PATCH_419" ]; then
-  echo "Application du patch: $PATCH_419"
-  patch -p1 < "$PATCH_419" 2>&1 | tee /tmp/susfs_patch.log || true
+  echo "=== Application SUSFS patch ==="
+  echo "Patch trouvé : $PATCH_419"
+
+  patch -p1 < "$PATCH_419" 2>&1 | tee /tmp/susfs_patch.log
+
+  if grep -q "FAILED" /tmp/susfs_patch.log; then
+    echo "❌ Patch SUSFS échoué"
+    exit 1
+  fi
+
 else
-  echo "Recherche des patches..."
-  find /tmp/jack_repo/Patches -name "*.patch" | head -20
+  echo "❌ Aucun patch SUSFS 4.19 trouvé"
+  exit 1
 fi
+
+echo "=== Vérification sources SUSFS ==="
+
+find . -iname "*susfs*" -o -iname "susfs_def.h"
+
+echo "=== Vérification drivers/kernelsu ==="
+
+ls drivers/kernelsu
 
 echo "=== Vérification des .rej ==="
 
