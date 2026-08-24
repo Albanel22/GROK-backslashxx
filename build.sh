@@ -125,7 +125,11 @@ else
   echo "Recherche des patches..."
   find /tmp/jack_repo/Patches -name "*.patch" | head -20
 fi
-
+echo "=== Contenu des .rej ==="
+echo "----- fs/namespace.c.rej -----"
+cat fs/namespace.c.rej 2>/dev/null || echo "Pas de namespace.c.rej"
+echo "----- fs/proc/task_mmu.c.rej -----"
+cat fs/proc/task_mmu.c.rej 2>/dev/null || echo "Pas de task_mmu.c.rej"
 echo "=== Vérification des .rej ==="
 
 find . -name "*.rej" -type f | while read -r rej; do
